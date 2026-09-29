@@ -4,12 +4,21 @@
  * - Enhanced Transactions API: 解析过的交易数据
  * - Enhanced Webhooks: 实时推送
  * - DAS API: 资产元数据
+ *
+ * 新版 endpoint 格式（api-key 通过 query string 传入）：
+ *   - RPC:               POST https://mainnet.helius-rpc.com/?api-key=<KEY>
+ *   - 解析交易:          POST https://mainnet.helius-rpc.com/v0/transactions/?api-key=<KEY>
+ *   - 地址交易:          GET  https://mainnet.helius-rpc.com/v0/addresses/<addr>/transactions/?api-key=<KEY>
+ *   - Webhook 列表:      GET  https://mainnet.helius-rpc.com/v0/webhooks/?api-key=<KEY>
+ *   - Webhook 创建:      POST https://mainnet.helius-rpc.com/v0/webhooks/?api-key=<KEY>
+ *   - Webhook 更新:      PUT  https://mainnet.helius-rpc.com/v0/webhooks/<id>/?api-key=<KEY>
+ *   - Webhook 删除:      DELETE https://mainnet.helius-rpc.com/v0/webhooks/<id>/?api-key=<KEY>
  */
 
 import axios, { AxiosInstance } from 'axios';
 import type { HeliusEnhancedTx } from './types';
 
-const HELIUS_BASE = 'https://api-mainnet.helius-rpc.com';
+const HELIUS_BASE = 'https://mainnet.helius-rpc.com';
 
 export class HeliusClient {
   private http: AxiosInstance;
@@ -21,12 +30,13 @@ export class HeliusClient {
       baseURL: HELIUS_BASE,
       timeout: 15_000,
       headers: { 'Content-Type': 'application/json' },
+      params: { 'api-key': apiKey },
     });
   }
 
   /** 通用 RPC 调用 */
   async rpc<T = any>(method: string, params: any[]): Promise<T> {
-    const { data } = await this.http.post(`/${this.apiKey}`, {
+    const { data } = await this.http.post('', {
       jsonrpc: '2.0',
       id: 'solwallet',
       method,
@@ -36,11 +46,11 @@ export class HeliusClient {
     return data.result as T;
   }
 
-  /** 通过 Enhanced Transactions API 解析单笔交易 */
+  /** 通过 Enhanced Transactions API 解析单笔/多笔交易 */
   async parseTransactions(signatures: string[]): Promise<HeliusEnhancedTx[]> {
     if (signatures.length === 0) return [];
     const { data } = await this.http.post(
-      `/${this.apiKey}/v0/transactions`,
+      '/v0/transactions/',
       { transactions: signatures },
       { timeout: 30_000 },
     );
@@ -76,32 +86,29 @@ export class HeliusClient {
     transactionTypes?: string[];
     webhookType?: 'enhanced' | 'raw';
   }): Promise<{ webhookID: string }> {
-    const { data } = await this.http.post(
-      `/${this.apiKey}/webhooks`,
-      {
-        webhookURL: opts.webhookURL,
-        transactionTypes: opts.transactionTypes ?? ['Any'],
-        accountAddresses: opts.accountAddresses,
-        webhookType: opts.webhookType ?? 'enhanced',
-      },
-    );
+    const { data } = await this.http.post('/v0/webhooks/', {
+      webhookURL: opts.webhookURL,
+      transactionTypes: opts.transactionTypes ?? ['Any'],
+      accountAddresses: opts.accountAddresses,
+      webhookType: opts.webhookType ?? 'enhanced',
+    });
     return data;
   }
 
   /** 列出所有 Webhooks */
   async listWebhooks(): Promise<Array<{ webhookID: string; webhookURL: string; accountAddresses: string[]; transactionTypes: string[]; webhookType: string }>> {
-    const { data } = await this.http.get(`/${this.apiKey}/webhooks`);
+    const { data } = await this.http.get('/v0/webhooks/');
     return data;
   }
 
   /** 删除 Webhook */
   async deleteWebhook(webhookID: string): Promise<void> {
-    await this.http.delete(`/${this.apiKey}/webhooks/${webhookID}`);
+    await this.http.delete(`/v0/webhooks/${webhookID}/`);
   }
 
   /** 给 Webhook 增删地址 */
   async updateWebhookAddresses(webhookID: string, accountAddresses: string[]): Promise<void> {
-    await this.http.put(`/${this.apiKey}/webhooks/${webhookID}`, { accountAddresses });
+    await this.http.put(`/v0/webhooks/${webhookID}/`, { accountAddresses });
   }
 }
 
