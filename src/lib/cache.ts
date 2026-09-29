@@ -140,7 +140,7 @@ export class Cache {
     if (redisEnabled && redis) {
       try {
         const keys = await redis.keys('*');
-        if (keys.length > 0) await redis.del(...keys);
+        if (keys.length > 0) await redis.del(...(keys as [string, ...string[]]));
       } catch { /* ignore */ }
     }
     memoryCache.clear();

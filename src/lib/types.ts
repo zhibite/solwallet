@@ -103,7 +103,7 @@ export interface HeliusEnhancedTx {
 export interface SolanaBlock {
   blockhash: string;
   blockTime: number | null;
-  blockHeight: number;
+  blockHeight?: number;
   parentSlot: number;
   transactions: Array<{
     transaction: {

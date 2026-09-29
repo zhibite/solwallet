@@ -204,7 +204,7 @@ export class MultiFreeRpc {
       case 'getBlockHeight':
         return conn.getBlockHeight();
       case 'getMultipleAccounts':
-        return conn.getMultipleAccounts(params[0].map((p: string) => new PublicKey(p)));
+        return conn.getMultipleAccountsInfo(params[0].map((p: string) => new PublicKey(p)));
       default:
         throw new Error(`Unsupported method: ${method}`);
     }
