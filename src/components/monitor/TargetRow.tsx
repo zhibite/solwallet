@@ -1,8 +1,8 @@
 "use client";
 import React, { useState, useEffect } from "react";
-import AddressCopy from "./AddressCopy";
-import SolAmount from "./SolAmount";
-import RelativeTime from "./RelativeTime";
+import AddressCopy from "@/components/common/AddressCopy";
+import SolAmount from "@/components/common/SolAmount";
+import RelativeTime from "@/components/common/RelativeTime";
 import { ChevronDownIcon, ChevronUpIcon, TrashBinIcon, TimeIcon } from "@/icons";
 import Link from "next/link";
 

@@ -8,8 +8,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "db:init": "tsx scripts/init-db.ts",
-    "monitor": "tsx scripts/monitor.ts"
+    "db:init": "tsx --env-file=.env scripts/init-db.ts",
+    "monitor": "tsx --env-file=.env scripts/monitor.ts"
   },
   "dependencies": {
     "@fullcalendar/core": "^6.1.19",
