@@ -93,7 +93,7 @@ export default function MonitorList() {
     try {
       const res = await fetch('/api/targets/clear-all', { method: 'POST' });
       const json = await res.json();
-      if (json.ok) alert(`已清空 ${json.deleted} 条记录`);
+      if (json.ok) alert(`已清空 ${json.deleted.trades} 条交易、${json.deleted.analyses} 条分析`);
       else alert(`失败: ${json.error}`);
       await load();
     } finally {

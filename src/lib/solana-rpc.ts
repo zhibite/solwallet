@@ -51,9 +51,10 @@ class SolanaRPC {
   private async callMethod(conn: Connection, method: string, params: any[]): Promise<any> {
     switch (method) {
       case 'getBlock':
-        return conn.getBlock(params[0], params[1] ?? { maxSupportedTransactionVersion: 0 });
+        // 默认 maxSupportedTransactionVersion=1，支持 legacy + v0 + v1
+        return conn.getBlock(params[0], params[1] ?? { maxSupportedTransactionVersion: 1 });
       case 'getTransaction':
-        return conn.getTransaction(params[0], params[1] ?? { maxSupportedTransactionVersion: 0 });
+        return conn.getTransaction(params[0], params[1] ?? { maxSupportedTransactionVersion: 1 });
       case 'getSignaturesForAddress':
         return conn.getSignaturesForAddress(new PublicKey(params[0]), params[1] ?? { limit: 100 });
       case 'getSlot':
@@ -66,11 +67,11 @@ class SolanaRPC {
   }
 
   async getBlock(slot: number, opts: { transactionDetails?: 'full' | 'signatures' | 'none' } = {}): Promise<BlockResponse | null> {
-    return this.rpc('getBlock', [slot, { maxSupportedTransactionVersion: 0, ...opts }], 30_000);
+    return this.rpc('getBlock', [slot, { maxSupportedTransactionVersion: 1, ...opts }], 30_000);
   }
 
   async getTransaction(signature: string): Promise<TransactionResponse | null> {
-    return this.rpc('getTransaction', [signature, { maxSupportedTransactionVersion: 0 }], 5 * 60_000);
+    return this.rpc('getTransaction', [signature, { maxSupportedTransactionVersion: 1 }], 5 * 60_000);
   }
 
   async getSignaturesForAddress(address: string, limit = 100): Promise<any[]> {

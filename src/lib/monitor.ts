@@ -17,6 +17,7 @@ import { saveBlockAnalysis } from './first-sniper';
 
 const POLL_INTERVAL_MS = parseInt(process.env.MONITOR_POLL_INTERVAL_MS || '5000', 10);
 const WEBHOOK_URL = process.env.WEBHOOK_URL || '';
+const WEBHOOK_ONLY = process.env.HELIUS_USE_WEBHOOK === 'true' && !!WEBHOOK_URL;
 const lastSigs = new Map<number, string>(); // targetId -> latest signature
 
 let running = false;
@@ -36,7 +37,7 @@ export async function startMonitor() {
   }
 
   // 1) 注册 Helius Webhook
-  if (process.env.HELIUS_USE_WEBHOOK === 'true' && WEBHOOK_URL) {
+  if (WEBHOOK_ONLY) {
     try {
       await registerWebhooks();
     } catch (err) {
@@ -44,8 +45,13 @@ export async function startMonitor() {
     }
   }
 
-  // 2) 启动 polling loop
-  scheduleNextPoll();
+  // 2) 启动 polling loop（webhook 模式下跳过，避免双倍 RPC）
+  if (!WEBHOOK_ONLY) {
+    console.log('[monitor] polling mode (webhook 关闭)');
+    scheduleNextPoll();
+  } else {
+    console.log('[monitor] webhook only mode，跳过轮询');
+  }
 }
 
 /** 停止监控 */
@@ -97,10 +103,10 @@ async function pollAllTargets() {
         // 写库
         await ingestTargetTrade(t.id, buy, tx);
       }
-      // 更新 last_buy_at
+      // 更新 last_buy_at（不修改 record_count，那由 ingestTargetTrade 维护）
       if (sigs.length > 0) {
         await query(
-          'UPDATE monitored_targets SET last_buy_at = to_timestamp($1), record_count = record_count + 1 WHERE id = $2',
+          'UPDATE monitored_targets SET last_buy_at = to_timestamp($1) WHERE id = $2',
           [sigs[0].blockTime, t.id],
         );
       }
@@ -115,13 +121,14 @@ export async function ingestTargetTrade(targetId: number, buy: any, rawTx: any) 
   const { saveBlockAnalysis, analyzeBlock } = await import('./first-sniper');
 
   // 1) 写 target_trades（COALESCE 兜底，防止 blockTime 为 0/undefined 时 to_timestamp 失败）
-  const inserted = await queryOne<{ id: number }>(`
+  //    用 xmax=0 判定「真实新增」——ON CONFLICT DO UPDATE 触发的更新 xmax ≠ 0
+  const inserted = await queryOne<{ id: number; was_inserted: boolean }>(`
     INSERT INTO target_trades (
       target_id, signature, slot, block_time, mint, target_address,
       buy_sol, target_tip_sol, target_prio_lamports, is_bundled, version
     ) VALUES ($1,$2,$3,to_timestamp(COALESCE(NULLIF($4, 0), EXTRACT(epoch FROM NOW()))),$5,$6,$7,$8,$9,$10,$11)
     ON CONFLICT (signature) DO UPDATE SET slot = EXCLUDED.slot
-    RETURNING id
+    RETURNING id, (xmax = 0) AS was_inserted
   `, [
     targetId,
     buy.signature,
@@ -137,6 +144,14 @@ export async function ingestTargetTrade(targetId: number, buy: any, rawTx: any) 
   ]);
 
   if (!inserted) return;
+
+  // 1.5) 真实新增时 +1（webhook 重投 / polling 重复扫到同一个 sig 不会重复计数）
+  if (inserted.was_inserted) {
+    await query(
+      'UPDATE monitored_targets SET record_count = record_count + 1 WHERE id = $1',
+      [targetId],
+    );
+  }
 
   // 2) 触发 block 级分析（异步，不阻塞）
   setImmediate(async () => {

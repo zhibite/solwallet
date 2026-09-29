@@ -194,9 +194,10 @@ export class MultiFreeRpc {
   private async callMethod(conn: Connection, method: string, params: any[]): Promise<any> {
     switch (method) {
       case 'getBlock':
-        return conn.getBlock(params[0], params[1] ?? { maxSupportedTransactionVersion: 0 });
+        // 默认 maxSupportedTransactionVersion=1，支持 legacy + v0 + v1
+        return conn.getBlock(params[0], params[1] ?? { maxSupportedTransactionVersion: 1 });
       case 'getTransaction':
-        return conn.getTransaction(params[0], params[1] ?? { maxSupportedTransactionVersion: 0 });
+        return conn.getTransaction(params[0], params[1] ?? { maxSupportedTransactionVersion: 1 });
       case 'getSignaturesForAddress':
         return conn.getSignaturesForAddress(new PublicKey(params[0]), params[1] ?? { limit: 100 });
       case 'getSlot':
@@ -258,11 +259,11 @@ export class MultiFreeRpc {
 
   async getBlock(slot: number): Promise<BlockResponse | null> {
     // block 缓存 30 秒（slot 不会重组超过这点时间）
-    return this.rpc('getBlock', [slot, { maxSupportedTransactionVersion: 0, transactionDetails: 'full' }], 30_000);
+    return this.rpc('getBlock', [slot, { maxSupportedTransactionVersion: 1, transactionDetails: 'full' }], 30_000);
   }
 
   async getTransaction(sig: string): Promise<TransactionResponse | null> {
-    return this.rpc('getTransaction', [sig, { maxSupportedTransactionVersion: 0 }], 5 * 60_000);
+    return this.rpc('getTransaction', [sig, { maxSupportedTransactionVersion: 1 }], 5 * 60_000);
   }
 
   async getSignaturesForAddress(address: string, limit = 100): Promise<any[]> {
