@@ -18,7 +18,7 @@ export async function getTokenPriceUsd(mint: string): Promise<number | null> {
       // DexScreener
       try {
         const { data } = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, { timeout: 8_000 });
-        const pair = data?.pairs?.?.[0];
+        const pair = data?.pairs?.[0];
         if (pair?.priceUsd) return parseFloat(pair.priceUsd);
       } catch {
         // fallthrough
