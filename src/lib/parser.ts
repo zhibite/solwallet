@@ -166,47 +166,63 @@ export function parseBlockTxs(
   const result: ParsedBuy[] = [];
 
   for (const wrapper of block.transactions) {
-    const { transaction, meta } = wrapper;
-    if (!meta || meta.err) continue; // 失败交易
+    try {
+      const { transaction, meta } = wrapper;
+      if (!meta || meta.err) continue; // 失败交易
 
-    const sig = transaction.signatures[0];
-    const accountKeys = transaction.message.accountKeys;
-    const feePayer = accountKeys[0];
+      // VersionedTransaction 的 message 是 VersionedMessage，accountKeys 可能用 getter 或 getAccountKeys()
+      const sig = transaction?.signatures?.[0];
+      if (!sig) continue;
+      const msg: any = transaction?.message;
+      if (!msg) continue;
+      const accountKeys: any[] = msg.accountKeys ?? (typeof msg.getAccountKeys === 'function' ? msg.getAccountKeys() : []);
+      const feePayer = accountKeys[0]?.toBase58?.() ?? accountKeys[0];
+      if (!feePayer) continue;
 
-    // 简单判断：token balance change 包含目标 mint，且为 feePayer 收入
-    const postToken = meta.postTokenBalances ?? [];
-    const preToken = meta.preTokenBalances ?? [];
+      // SOL 净流出（preBalance/postBalance 都是按账户 index 的数组，0 = feePayer）
+      const preBal = meta.preBalances ?? [];
+      const postBal = meta.postBalances ?? [];
+      const preBal0 = preBal[0] ?? 0;
+      const postBal0 = postBal[0] ?? 0;
 
-    // 找到 feePayer 的 token balance 变化
-    for (const post of postToken) {
-      if (post.owner !== feePayer) continue;
-      if (targetMint && post.mint !== targetMint) continue;
+      // 简单判断：token balance change 包含目标 mint，且为 feePayer 收入
+      const postToken = meta.postTokenBalances ?? [];
+      const preToken = meta.preTokenBalances ?? [];
 
-      const pre = preToken.find((p) => p.accountIndex === post.accountIndex);
-      const preAmount = pre ? Number(pre.uiTokenAmount.amount) : 0;
-      const postAmount = Number(post.uiTokenAmount.amount);
-      const delta = postAmount - preAmount;
+      // 找到 feePayer 的 token balance 变化
+      for (const post of postToken) {
+        if (post.owner !== feePayer) continue;
+        if (targetMint && post.mint !== targetMint) continue;
 
-      if (delta > 0) {
-        // SOL 净流出 = preBalance[0] - postBalance[0]
-        const solOut = (meta.preBalances[0] - meta.postBalances[0]) / LAMPORTS_PER_SOL;
-        result.push({
-          signature: sig,
-          slot: 0,
-          blockTime: block.blockTime ?? 0,
-          address: feePayer,
-          mint: post.mint,
-          buySol: solOut,
-          tipSol: 0,    // RPC fallback 难算 tip
-          prioLamports: meta.fee - 5000,
-          fee: meta.fee,
-          version: 'legacy',
-          isBundled: false,
-          source: '',
-          success: true,
-          tokenAmount: delta,
-        });
+        const pre = preToken.find((p) => p.accountIndex === post.accountIndex);
+        const preAmount = pre ? Number(pre.uiTokenAmount.amount) : 0;
+        const postAmount = Number(post.uiTokenAmount.amount);
+        const delta = postAmount - preAmount;
+
+        if (delta > 0) {
+          const solOut = (preBal0 - postBal0) / LAMPORTS_PER_SOL;
+          result.push({
+            signature: sig,
+            slot: 0,
+            blockTime: block.blockTime ?? 0,
+            address: feePayer,
+            mint: post.mint,
+            buySol: solOut,
+            tipSol: 0,    // RPC fallback 难算 tip
+            prioLamports: (meta.fee ?? 0) - 5000,
+            fee: meta.fee ?? 0,
+            version: 'legacy',
+            isBundled: false,
+            source: '',
+            success: true,
+            tokenAmount: delta,
+          });
+        }
       }
+    } catch (err) {
+      // 单笔 tx 解析失败不影响其它 tx，继续
+      console.warn('[parseBlockTxs] skip tx:', (err as Error).message);
+      continue;
     }
   }
   return result;

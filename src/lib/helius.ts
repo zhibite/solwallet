@@ -106,9 +106,18 @@ export class HeliusClient {
     await this.http.delete(`/v0/webhooks/${webhookID}/`);
   }
 
-  /** 给 Webhook 增删地址 */
+  /** 给 Webhook 增删地址（Helius PUT 需要完整 webhook 对象） */
   async updateWebhookAddresses(webhookID: string, accountAddresses: string[]): Promise<void> {
-    await this.http.put(`/v0/webhooks/${webhookID}/`, { accountAddresses });
+    // 先获取当前 webhook，再保留其它字段一并 PUT
+    const list = await this.listWebhooks();
+    const current = list.find((w) => w.webhookID === webhookID);
+    if (!current) throw new Error(`webhook ${webhookID} not found`);
+    await this.http.put(`/v0/webhooks/${webhookID}/`, {
+      webhookURL: current.webhookURL,
+      transactionTypes: current.transactionTypes ?? ['ANY'],
+      accountAddresses,
+      webhookType: current.webhookType ?? 'enhanced',
+    });
   }
 }
 
