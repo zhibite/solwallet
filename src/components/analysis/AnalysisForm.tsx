@@ -101,34 +101,34 @@ export default function AnalysisForm() {
   return (
     <div className="space-y-4">
       {/* 输入区 */}
-      <div className="bg-white dark:bg-zinc-900 rounded-lg border border-gray-200 dark:border-zinc-700 p-4">
+      <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 p-4">
         <div className="flex flex-wrap gap-3 items-end">
           <div className="flex-1 min-w-[300px]">
-            <label className="block text-xs text-gray-500 mb-1">目标钱包地址</label>
+            <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">目标钱包地址</label>
             <input
               type="text"
               value={address}
               onChange={(e) => setAddress(e.target.value.trim())}
               placeholder="Solana 地址..."
-              className="w-full h-10 px-3 rounded border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500"
+              className="w-full px-4 py-2 pr-10 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-zinc-700 text-sm font-mono text-gray-800 dark:text-white/90 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
           <div>
-            <label className="block text-xs text-gray-500 mb-1">开始日期</label>
+            <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">开始日期</label>
             <input
               type="date"
               value={from}
               onChange={(e) => setFrom(e.target.value)}
-              className="h-10 px-3 rounded border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm"
+              className="h-10 px-4 py-2 pr-10 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-zinc-700 text-sm text-gray-800 dark:text-white/90 focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
           <div>
-            <label className="block text-xs text-gray-500 mb-1">结束日期</label>
+            <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">结束日期</label>
             <input
               type="date"
               value={to}
               onChange={(e) => setTo(e.target.value)}
-              className="h-10 px-3 rounded border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm"
+              className="h-10 px-4 py-2 pr-10 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-zinc-700 text-sm text-gray-800 dark:text-white/90 focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
           <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
@@ -143,7 +143,7 @@ export default function AnalysisForm() {
           <button
             onClick={analyze}
             disabled={loading}
-            className="h-10 px-5 rounded bg-brand-500 hover:bg-brand-600 disabled:opacity-50 text-white text-sm font-medium"
+            className="h-10 px-5 rounded-xl bg-brand-500 hover:bg-brand-600 disabled:opacity-50 text-white text-sm font-medium"
           >
             {loading ? '分析中...' : '分析'}
           </button>
@@ -170,41 +170,41 @@ export default function AnalysisForm() {
             <button
               onClick={confirmTarget}
               disabled={confirming}
-              className="h-9 px-4 rounded bg-success-500 hover:bg-success-600 disabled:opacity-50 text-white text-sm font-medium"
+              className="h-9 px-4 rounded-xl bg-success-500 hover:bg-success-600 disabled:opacity-50 text-white text-sm font-medium"
             >
               {confirming ? '提交中...' : '一键确认目标'}
             </button>
             <button
               onClick={exportCsv}
-              className="h-9 px-4 rounded bg-gray-200 dark:bg-zinc-700 hover:bg-gray-300 dark:hover:bg-zinc-600 text-gray-700 dark:text-gray-200 text-sm"
+              className="h-9 px-4 rounded-xl bg-slate-100 dark:bg-zinc-700 hover:bg-slate-200 dark:hover:bg-zinc-600 text-gray-500 dark:text-gray-400 text-sm"
             >
               导出已确认目标
             </button>
           </div>
 
           {/* 交易列表 */}
-          <div className="bg-white dark:bg-zinc-900 rounded-lg border border-gray-200 dark:border-zinc-700 overflow-hidden">
-            <div className="flex items-center gap-2 p-3 border-b border-gray-200 dark:border-zinc-700 text-sm">
+          <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
+            <div className="flex items-center gap-2 p-3 border-b border-gray-200 dark:border-gray-700 text-sm">
               <button
                 onClick={() => setFilter('all')}
-                className={`px-3 py-1 rounded text-xs ${
-                  filter === 'all' ? 'bg-brand-500 text-white' : 'bg-gray-100 dark:bg-zinc-800 text-gray-600'
+                className={`px-3 py-1 rounded-xl text-xs ${
+                  filter === 'all' ? 'bg-brand-500 text-white' : 'bg-slate-100 dark:bg-zinc-700 text-gray-500 dark:text-gray-400 hover:bg-slate-200 dark:hover:bg-zinc-600'
                 }`}
               >
                 全部 ({result.trades.length})
               </button>
               <button
                 onClick={() => setFilter('confirmed')}
-                className={`px-3 py-1 rounded text-xs ${
-                  filter === 'confirmed' ? 'bg-success-500 text-white' : 'bg-gray-100 dark:bg-zinc-800 text-gray-600'
+                className={`px-3 py-1 rounded-xl text-xs ${
+                  filter === 'confirmed' ? 'bg-success-500 text-white' : 'bg-slate-100 dark:bg-zinc-700 text-gray-500 dark:text-gray-400 hover:bg-slate-200 dark:hover:bg-zinc-600'
                 }`}
               >
                 只看成功 ({result.confirmed})
               </button>
               <button
                 onClick={() => setFilter('failed')}
-                className={`px-3 py-1 rounded text-xs ${
-                  filter === 'failed' ? 'bg-error-500 text-white' : 'bg-gray-100 dark:bg-zinc-800 text-gray-600'
+                className={`px-3 py-1 rounded-xl text-xs ${
+                  filter === 'failed' ? 'bg-error-500 text-white' : 'bg-slate-100 dark:bg-zinc-700 text-gray-500 dark:text-gray-400 hover:bg-slate-200 dark:hover:bg-zinc-600'
                 }`}
               >
                 只看失败 ({result.failed})
@@ -212,7 +212,7 @@ export default function AnalysisForm() {
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
-                <thead className="bg-gray-50 dark:bg-zinc-800/50 text-xs text-gray-500">
+                <thead className="bg-gray-50 dark:bg-zinc-700/50 text-xs text-gray-500 dark:text-gray-400">
                   <tr>
                     <th className="px-3 py-2 text-left">时间</th>
                     <th className="px-3 py-2 text-left">SLOT</th>
@@ -227,12 +227,12 @@ export default function AnalysisForm() {
                 </thead>
                 <tbody>
                   {filteredTrades.length === 0 ? (
-                    <tr><td colSpan={9} className="px-3 py-6 text-center text-gray-500">无符合条件的交易</td></tr>
+                    <tr><td colSpan={9} className="px-3 py-6 text-center text-gray-500 dark:text-gray-400">无符合条件的交易</td></tr>
                   ) : (
                     filteredTrades.map((t) => (
-                      <tr key={t.signature} className="border-b border-gray-100 dark:border-zinc-700/50">
+                      <tr key={t.signature} className="border-b border-gray-100 dark:border-gray-700/50">
                         <td className="px-3 py-2"><RelativeTime iso={new Date(t.blockTime * 1000).toISOString()} /></td>
-                        <td className="px-3 py-2 font-mono text-xs text-gray-500">{t.slot}</td>
+                        <td className="px-3 py-2 font-mono text-xs text-gray-500 dark:text-gray-400">{t.slot}</td>
                         <td className="px-3 py-2"><AddressCopy address={t.mint} length={4} /></td>
                         <td className="px-3 py-2 text-right"><SolAmount value={t.sol} /></td>
                         <td className="px-3 py-2 text-right"><SolAmount value={t.pnl} signed /></td>
@@ -268,7 +268,7 @@ export default function AnalysisForm() {
       )}
 
       {!result && !loading && (
-        <div className="bg-white dark:bg-zinc-900 rounded-lg border border-gray-200 dark:border-zinc-700 p-8 text-center text-gray-500">
+        <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 p-8 text-center text-gray-500 dark:text-gray-400">
           请输入目标地址和时间范围进行分析
         </div>
       )}
@@ -278,13 +278,13 @@ export default function AnalysisForm() {
 
 function StatCard({ label, value, highlight = false }: { label: string; value: React.ReactNode; highlight?: boolean }) {
   return (
-    <div className={`rounded-lg border p-3 ${
+    <div className={`rounded-lg border p-3 shadow-sm ${
       highlight
         ? 'bg-brand-50 dark:bg-brand-500/10 border-brand-200 dark:border-brand-500/30'
-        : 'bg-white dark:bg-zinc-900 border-gray-200 dark:border-zinc-700'
+        : 'bg-white dark:bg-zinc-800 border-gray-200 dark:border-gray-700'
     }`}>
-      <div className="text-xs text-gray-500">{label}</div>
-      <div className="text-lg font-semibold mt-0.5">{value}</div>
+      <div className="text-xs text-gray-500 dark:text-gray-400">{label}</div>
+      <div className="text-lg font-semibold mt-0.5 text-gray-800 dark:text-white/90">{value}</div>
     </div>
   );
 }

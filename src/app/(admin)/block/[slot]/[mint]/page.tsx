@@ -5,7 +5,7 @@ import { useParams } from "next/navigation";
 
 const BlockDetail = dynamic(() => import("@/components/block/BlockDetail"), {
   ssr: false,
-  loading: () => <div className="p-6 text-center text-gray-500">加载中...</div>,
+  loading: () => <div className="p-6 text-center text-gray-500 dark:text-gray-400">加载中...</div>,
 });
 
 export default function BlockPage() {

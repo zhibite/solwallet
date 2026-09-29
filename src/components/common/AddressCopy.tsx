@@ -22,7 +22,7 @@ export default function AddressCopy({ address, length = 6 }: { address: string; 
       title={address}
     >
       <span>{short}</span>
-      {copied ? <CheckLineIcon className="w-3 h-3 text-success-500" /> : <CopyIcon className="w-3 h-3 opacity-60" />}
+      {copied ? <CheckLineIcon className="w-3 h-3 text-success-500" /> : <CopyIcon className="w-3 h-3 opacity-60 dark:opacity-70" />}
     </button>
   );
 }

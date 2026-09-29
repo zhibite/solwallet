@@ -33,15 +33,15 @@ export default function RankingPage() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold text-gray-900 dark:text-white">跟单排行</h1>
-          <p className="text-sm text-gray-500 mt-1">按已确认目标的 PnL 排序，找到真正赚钱的聪明钱</p>
+          <h1 className="text-xl font-semibold text-gray-800 dark:text-white/90">跟单排行</h1>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">按已确认目标的 PnL 排序，找到真正赚钱的聪明钱</p>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-xs text-gray-500">时间范围</span>
+          <span className="text-xs text-gray-500 dark:text-gray-400">时间范围</span>
           <select
             value={days}
             onChange={(e) => setDays(parseInt(e.target.value, 10))}
-            className="h-9 px-3 rounded border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-sm"
+            className="h-9 px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-zinc-700 text-sm text-gray-800 dark:text-white/90 focus:outline-none focus:ring-2 focus:ring-blue-500"
           >
             <option value={7}>最近 7 天</option>
             <option value={30}>最近 30 天</option>
@@ -50,10 +50,10 @@ export default function RankingPage() {
         </div>
       </div>
 
-      <div className="bg-white dark:bg-zinc-900 rounded-lg border border-gray-200 dark:border-zinc-700 overflow-hidden">
+      <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
-            <thead className="bg-gray-50 dark:bg-zinc-800/50 text-xs text-gray-500">
+            <thead className="bg-gray-50 dark:bg-zinc-700/50 text-xs text-gray-500 dark:text-gray-400">
               <tr>
                 <th className="px-3 py-2 text-center">#</th>
                 <th className="px-3 py-2 text-left">地址</th>
@@ -67,19 +67,19 @@ export default function RankingPage() {
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={8} className="px-3 py-6 text-center text-gray-500">加载中...</td></tr>
+                <tr><td colSpan={8} className="px-3 py-6 text-center text-gray-500 dark:text-gray-400">加载中...</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={8} className="px-3 py-6 text-center text-gray-500">暂无数据。请先在「跟单目标分析」中确认目标</td></tr>
+                <tr><td colSpan={8} className="px-3 py-6 text-center text-gray-500 dark:text-gray-400">暂无数据。请先在「跟单目标分析」中确认目标</td></tr>
               ) : (
                 rows.map((r, idx) => {
                   const winRate = r.win_count + r.loss_count > 0
                     ? r.win_count / (r.win_count + r.loss_count)
                     : 0;
                   return (
-                    <tr key={r.address} className="border-b border-gray-100 dark:border-zinc-700/50">
-                      <td className="px-3 py-2 text-center font-mono text-xs text-gray-500">{idx + 1}</td>
+                    <tr key={r.address} className="border-b border-gray-100 dark:border-gray-700/50">
+                      <td className="px-3 py-2 text-center font-mono text-xs text-gray-500 dark:text-gray-400">{idx + 1}</td>
                       <td className="px-3 py-2"><AddressCopy address={r.address} length={6} /></td>
-                      <td className="px-3 py-2 text-right font-mono">{r.trade_count}</td>
+                      <td className="px-3 py-2 text-right font-mono text-gray-800 dark:text-white/90">{r.trade_count}</td>
                       <td className="px-3 py-2 text-right"><SolAmount value={r.total_buy} /></td>
                       <td className="px-3 py-2 text-right"><SolAmount value={r.total_pnl} signed /></td>
                       <td className="px-3 py-2 text-right"><SolAmount value={r.avg_pnl} signed /></td>
@@ -87,7 +87,7 @@ export default function RankingPage() {
                         <span className={`font-mono text-xs ${winRate >= 0.5 ? 'text-success-500' : 'text-error-500'}`}>
                           {(winRate * 100).toFixed(1)}%
                         </span>
-                        <span className="text-xs text-gray-400 ml-1">({r.win_count}/{r.win_count + r.loss_count})</span>
+                        <span className="text-xs text-gray-400 dark:text-gray-500 ml-1">({r.win_count}/{r.win_count + r.loss_count})</span>
                       </td>
                       <td className="px-3 py-2 text-center"><RelativeTime iso={r.last_active} /></td>
                     </tr>

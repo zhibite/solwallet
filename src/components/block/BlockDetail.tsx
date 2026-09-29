@@ -83,7 +83,7 @@ export default function BlockDetail() {
     alert(`已加入自己钱包: ${address.slice(0, 8)}...`);
   };
 
-  if (loading) return <div className="p-6 text-center text-gray-500">加载中...</div>;
+  if (loading) return <div className="p-6 text-center text-gray-500 dark:text-gray-400">加载中...</div>;
   if (error) return <div className="p-6 text-center text-error-500">{error}</div>;
   if (!analysis) return null;
 
@@ -96,22 +96,22 @@ export default function BlockDetail() {
   return (
     <div className="space-y-4">
       {/* 头部信息 */}
-      <div className="bg-white dark:bg-zinc-900 rounded-lg border border-gray-200 dark:border-zinc-700 p-4">
-        <h1 className="text-lg font-semibold text-gray-900 dark:text-white mb-3">
+      <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+        <h1 className="text-lg font-semibold text-gray-800 dark:text-white/90 mb-3">
           Block 级深度分析
         </h1>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
           <div>
-            <span className="text-gray-500">目标交易：</span>
-            <span className="font-mono text-xs">{analysis.target_signature}</span>
+            <span className="text-gray-500 dark:text-gray-400">目标交易：</span>
+            <span className="font-mono text-xs text-gray-800 dark:text-white/90">{analysis.target_signature}</span>
           </div>
           <div>
-            <span className="text-gray-500">MINT：</span>
+            <span className="text-gray-500 dark:text-gray-400">MINT：</span>
             <AddressCopy address={analysis.mint} length={6} />
           </div>
           <div>
-            <span className="text-gray-500">SLOT：</span>
-            <span className="font-mono">{analysis.slot}</span>
+            <span className="text-gray-500 dark:text-gray-400">SLOT：</span>
+            <span className="font-mono text-gray-800 dark:text-white/90">{analysis.slot}</span>
             <a
               href={`https://solscan.io/block/${analysis.slot}`}
               target="_blank"
@@ -122,7 +122,7 @@ export default function BlockDetail() {
             </a>
           </div>
           <div>
-            <span className="text-gray-500">时间：</span>
+            <span className="text-gray-500 dark:text-gray-400">时间：</span>
             <RelativeTime iso={analysis.block_time} />
             <span className="ml-1 text-gray-400 text-xs">
               ({new Date(analysis.block_time).toLocaleString()})
@@ -131,9 +131,9 @@ export default function BlockDetail() {
         </div>
 
         {/* 上下文统计 */}
-        <div className="mt-4 pt-3 border-t border-gray-200 dark:border-zinc-700 text-xs text-gray-600 dark:text-gray-400">
+        <div className="mt-4 pt-3 border-t border-gray-200 dark:border-gray-700 text-xs text-gray-600 dark:text-gray-400">
           <p>
-            <span className="font-semibold text-gray-900 dark:text-white">{sameSlotCount}</span> 笔交易 (含失败的) 在同一个 slot 内。
+            <span className="font-semibold text-gray-800 dark:text-white/90">{sameSlotCount}</span> 笔交易 (含失败的) 在同一个 slot 内。
             {myWallets.length > 0 && (
               <span className="ml-2">
                 我的账号排位: {myWallets.map((w) => `#${w.block_index + 1}`).join(', ')}
@@ -144,13 +144,13 @@ export default function BlockDetail() {
       </div>
 
       {/* Block 内每笔交易 */}
-      <div className="bg-white dark:bg-zinc-900 rounded-lg border border-gray-200 dark:border-zinc-700 overflow-hidden">
-        <div className="px-4 py-3 border-b border-gray-200 dark:border-zinc-700">
-          <h2 className="text-sm font-semibold">Slot 内所有交易（{buyers.length} 笔）</h2>
+      <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
+        <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+          <h2 className="text-sm font-semibold text-gray-800 dark:text-white/90">Slot 内所有交易（{buyers.length} 笔）</h2>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
-            <thead className="bg-gray-50 dark:bg-zinc-800/50 text-xs text-gray-500">
+            <thead className="bg-gray-50 dark:bg-zinc-700/50 text-xs text-gray-500 dark:text-gray-400">
               <tr>
                 <th className="px-3 py-2 text-left">块内序</th>
                 <th className="px-3 py-2 text-right">偏移 (ms)</th>
@@ -172,7 +172,7 @@ export default function BlockDetail() {
                 return (
                   <tr
                     key={b.id}
-                    className={`border-b border-gray-100 dark:border-zinc-700/50 ${
+                    className={`border-b border-gray-100 dark:border-gray-700/50 ${
                       isTarget
                         ? 'bg-brand-50 dark:bg-brand-500/10'
                         : b.is_first_sniper
@@ -182,8 +182,8 @@ export default function BlockDetail() {
                             : ''
                     }`}
                   >
-                    <td className="px-3 py-2 font-mono text-xs">{b.block_index + 1}</td>
-                    <td className={`px-3 py-2 text-right font-mono text-xs ${b.offset_ms > 0 ? 'text-error-500' : b.offset_ms < 0 ? 'text-success-600' : ''}`}>
+                    <td className="px-3 py-2 font-mono text-xs text-gray-800 dark:text-white/90">{b.block_index + 1}</td>
+                    <td className={`px-3 py-2 text-right font-mono text-xs ${b.offset_ms > 0 ? 'text-error-500' : b.offset_ms < 0 ? 'text-success-600' : 'text-gray-500 dark:text-gray-400'}`}>
                       {b.offset_ms > 0 ? '+' : ''}{b.offset_ms}
                     </td>
                     <td className="px-3 py-2">
@@ -213,9 +213,9 @@ export default function BlockDetail() {
                       ) : (
                         <span className="inline-block w-2 h-2 rounded-full bg-error-500"></span>
                       )}
-                      <span className="ml-1 text-xs">{b.result}</span>
+                      <span className="ml-1 text-xs text-gray-500 dark:text-gray-400">{b.result}</span>
                     </td>
-                    <td className="px-3 py-2 text-center text-xs">{b.version}</td>
+                    <td className="px-3 py-2 text-center text-xs text-gray-500 dark:text-gray-400">{b.version}</td>
                     <td className="px-3 py-2 text-center">
                       <a
                         href={`https://solscan.io/tx/${b.signature}`}
@@ -230,7 +230,7 @@ export default function BlockDetail() {
                       <div className="flex items-center justify-center gap-2 text-xs">
                         <button
                           onClick={() => recalc(b.id)}
-                          className="text-gray-500 hover:text-brand-500"
+                          className="text-gray-500 dark:text-gray-400 hover:text-brand-500"
                           title="重算"
                         >
                           重算
@@ -238,7 +238,7 @@ export default function BlockDetail() {
                         {!b.is_own && (
                           <button
                             onClick={() => setAsCopyTrader(b.address)}
-                            className="text-gray-500 hover:text-success-500"
+                            className="text-gray-500 dark:text-gray-400 hover:text-success-500"
                             title="设为跟单者"
                           >
                             +

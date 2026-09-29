@@ -10,9 +10,9 @@ export default function RelativeTime({ iso }: { iso: string | null | undefined }
     return () => clearInterval(t);
   }, []);
 
-  if (!iso) return <span className="text-gray-400">-</span>;
+  if (!iso) return <span className="text-gray-400 dark:text-gray-500">-</span>;
   const ts = new Date(iso).getTime();
-  if (Number.isNaN(ts)) return <span className="text-gray-400">-</span>;
+  if (Number.isNaN(ts)) return <span className="text-gray-400 dark:text-gray-500">-</span>;
 
   const diffSec = Math.floor((now - ts) / 1000);
   let label: string;
@@ -26,7 +26,7 @@ export default function RelativeTime({ iso }: { iso: string | null | undefined }
   }
 
   return (
-    <span className="font-mono text-xs text-gray-600 dark:text-gray-400" title={new Date(ts).toISOString()}>
+    <span className="font-mono text-xs text-gray-500 dark:text-gray-400" title={new Date(ts).toISOString()}>
       {label}
     </span>
   );

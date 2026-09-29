@@ -87,21 +87,21 @@ export default function MonitorList() {
       <AddTargetForm onAdd={handleAdd} />
 
       {/* 列表 */}
-      <div className="bg-white dark:bg-zinc-900 rounded-lg border border-gray-200 dark:border-zinc-700 overflow-hidden">
-        <div className="flex items-center justify-between p-3 border-b border-gray-200 dark:border-zinc-700">
+      <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
+        <div className="flex items-center justify-between p-3 border-b border-gray-200 dark:border-gray-700">
           <div className="flex items-center gap-2 text-sm">
-            <span className="font-medium">监控列表</span>
-            <span className="text-xs text-gray-500">共 {filtered.length} 个</span>
+            <span className="font-medium text-gray-800 dark:text-white/90">监控列表</span>
+            <span className="text-xs text-gray-500 dark:text-gray-400">共 {filtered.length} 个</span>
           </div>
           <div className="flex items-center gap-1 text-xs">
             {(['all', 'active', 'paused'] as const).map((f) => (
               <button
                 key={f}
                 onClick={() => setStatusFilter(f)}
-                className={`px-3 py-1 rounded ${
+                className={`px-3 py-1 rounded-xl ${
                   statusFilter === f
                     ? 'bg-brand-500 text-white'
-                    : 'bg-gray-100 dark:bg-zinc-800 text-gray-600 dark:text-gray-400'
+                    : 'bg-slate-100 dark:bg-zinc-700 text-gray-500 dark:text-gray-400 hover:bg-slate-200 dark:hover:bg-zinc-600'
                 }`}
               >
                 {f === 'all' ? '全部' : f === 'active' ? '监控中' : '已暂停'}
@@ -111,7 +111,7 @@ export default function MonitorList() {
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
-            <thead className="bg-gray-50 dark:bg-zinc-800/50 text-xs text-gray-500">
+            <thead className="bg-gray-50 dark:bg-zinc-800/50 text-xs text-gray-500 dark:text-gray-400">
               <tr>
                 <th className="px-3 py-2 text-left font-medium">监控目标</th>
                 <th className="px-3 py-2 text-left font-medium">阈值</th>
@@ -124,9 +124,9 @@ export default function MonitorList() {
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={7} className="px-3 py-6 text-center text-sm text-gray-500">加载中...</td></tr>
+                <tr><td colSpan={7} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">加载中...</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={7} className="px-3 py-6 text-center text-sm text-gray-500">暂无监控目标</td></tr>
+                <tr><td colSpan={7} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">暂无监控目标</td></tr>
               ) : (
                 filtered.map((t) => (
                   <TargetRow
@@ -150,9 +150,9 @@ export default function MonitorList() {
 
 function StatCard({ label, value }: { label: string; value: number | string }) {
   return (
-    <div className="bg-white dark:bg-zinc-900 rounded-lg border border-gray-200 dark:border-zinc-700 p-4">
-      <div className="text-xs text-gray-500">{label}</div>
-      <div className="text-2xl font-semibold mt-1 text-gray-900 dark:text-white">{value}</div>
+    <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+      <div className="text-xs text-gray-500 dark:text-gray-400">{label}</div>
+      <div className="text-2xl font-semibold mt-1 text-gray-800 dark:text-white/90">{value}</div>
     </div>
   );
 }

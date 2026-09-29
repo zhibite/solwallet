@@ -79,14 +79,14 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
 
   return (
     <>
-      <tr className="border-b border-gray-200 dark:border-zinc-700 hover:bg-gray-50 dark:hover:bg-zinc-800/50">
+      <tr className="border-b border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-zinc-700/50">
         <td className="px-3 py-3">
           <div className="flex items-center gap-2">
-            <button onClick={toggleExpand} className="text-gray-500">
+            <button onClick={toggleExpand} className="text-gray-500 dark:text-gray-400">
               {expanded ? <ChevronUpIcon className="w-4 h-4" /> : <ChevronDownIcon className="w-4 h-4" />}
             </button>
             <AddressCopy address={target.address} />
-            {target.label && <span className="text-xs text-gray-500">({target.label})</span>}
+            {target.label && <span className="text-xs text-gray-500 dark:text-gray-400">({target.label})</span>}
           </div>
         </td>
         <td className="px-3 py-3">
@@ -97,7 +97,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                 step="0.1"
                 value={thresholdVal}
                 onChange={(e) => setThresholdVal(e.target.value)}
-                className="w-16 h-7 px-2 text-xs rounded border border-gray-300 dark:border-zinc-700 bg-white dark:bg-zinc-800"
+                className="w-16 h-7 px-2 text-xs rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-zinc-700 text-gray-800 dark:text-white/90 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 autoFocus
               />
               <button onClick={handleSaveThreshold} className="text-xs text-brand-500 hover:underline">保存</button>
@@ -129,10 +129,10 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
           {trades && trades.length > 0 ? (
             <div className="text-xs space-y-0.5">
               <AddressCopy address={trades[0].first_sniper || trades[0].mint} />
-              <div className="text-gray-500">
+              <div className="text-gray-500 dark:text-gray-400">
                 抢到 <SolAmount value={trades[0].first_sniper_buy_sol} signed /> / tip{' '}
                 <SolAmount value={trades[0].first_sniper_tip_sol} /> / prio{' '}
-                <span className="font-mono text-gray-500">{trades[0].first_sniper_prio_lamports || 0}</span>
+                <span className="font-mono text-gray-500 dark:text-gray-400">{trades[0].first_sniper_prio_lamports || 0}</span>
               </div>
             </div>
           ) : (
@@ -142,30 +142,30 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
         <td className="px-3 py-3">
           <div className="flex items-center gap-1 text-xs">
             {target.status === 'active' ? (
-              <button onClick={() => onPause(target.id)} className="text-gray-500 hover:text-warning-500">暂停</button>
+              <button onClick={() => onPause(target.id)} className="text-gray-500 dark:text-gray-400 hover:text-warning-500">暂停</button>
             ) : (
-              <button onClick={() => onResume(target.id)} className="text-gray-500 hover:text-success-500">继续</button>
+              <button onClick={() => onResume(target.id)} className="text-gray-500 dark:text-gray-400 hover:text-success-500">继续</button>
             )}
             <span className="text-gray-300">|</span>
-            <button onClick={() => onClear(target.id)} className="text-gray-500 hover:text-brand-500">清记录</button>
+            <button onClick={() => onClear(target.id)} className="text-gray-500 dark:text-gray-400 hover:text-brand-500">清记录</button>
             <span className="text-gray-300">|</span>
-            <button onClick={() => onDelete(target.id)} className="text-gray-500 hover:text-error-500">删除</button>
+            <button onClick={() => onDelete(target.id)} className="text-gray-500 dark:text-gray-400 hover:text-error-500">删除</button>
           </div>
         </td>
       </tr>
 
       {expanded && (
         <tr>
-          <td colSpan={7} className="bg-gray-50 dark:bg-zinc-800/30 px-6 py-4">
+          <td colSpan={7} className="bg-gray-50 dark:bg-zinc-700/30 px-6 py-4">
             {loadingTrades ? (
-              <div className="text-xs text-gray-500">加载中...</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">加载中...</div>
             ) : !trades || trades.length === 0 ? (
-              <div className="text-xs text-gray-500">暂无 buy 记录</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">暂无 buy 记录</div>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
-                  <thead className="text-gray-500">
-                    <tr className="border-b border-gray-200 dark:border-zinc-700">
+                  <thead className="text-gray-500 dark:text-gray-400">
+                    <tr className="border-b border-gray-200 dark:border-gray-700">
                       <th className="py-2 px-2 text-left">时间</th>
                       <th className="py-2 px-2 text-left">MINT</th>
                       <th className="py-2 px-2 text-left">SLOT</th>
@@ -182,10 +182,10 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                   </thead>
                   <tbody>
                     {trades.map((t) => (
-                      <tr key={t.id} className="border-b border-gray-100 dark:border-zinc-700/50 hover:bg-white dark:hover:bg-zinc-800">
+                      <tr key={t.id} className="border-b border-gray-100 dark:border-gray-700/50 hover:bg-white dark:hover:bg-zinc-700">
                         <td className="py-1.5 px-2"><RelativeTime iso={t.block_time} /></td>
                         <td className="py-1.5 px-2"><AddressCopy address={t.mint} length={4} /></td>
-                        <td className="py-1.5 px-2 font-mono text-gray-500">{t.slot}</td>
+                        <td className="py-1.5 px-2 font-mono text-gray-500 dark:text-gray-400">{t.slot}</td>
                         <td className="py-1.5 px-2 text-right"><SolAmount value={t.buy_sol} /></td>
                         <td className="py-1.5 px-2 text-right"><SolAmount value={t.target_tip_sol} /></td>
                         <td className="py-1.5 px-2 text-right font-mono">{t.target_prio_lamports || 0}</td>

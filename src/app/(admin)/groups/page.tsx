@@ -29,16 +29,16 @@ export default function GroupsPage() {
   return (
     <div className="space-y-4">
       <div>
-        <h1 className="text-xl font-semibold text-gray-900 dark:text-white">组合排行</h1>
-        <p className="text-sm text-gray-500 mt-1">
+        <h1 className="text-xl font-semibold text-gray-800 dark:text-white/90">组合排行</h1>
+        <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
           找出经常在同 slot 内同时买入相同 mint 的地址组合（可能是同一团队 / 机器人组）
         </p>
       </div>
 
-      <div className="bg-white dark:bg-zinc-900 rounded-lg border border-gray-200 dark:border-zinc-700 overflow-hidden">
+      <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
-            <thead className="bg-gray-50 dark:bg-zinc-800/50 text-xs text-gray-500">
+            <thead className="bg-gray-50 dark:bg-zinc-700/50 text-xs text-gray-500 dark:text-gray-400">
               <tr>
                 <th className="px-3 py-2 text-left">地址 A</th>
                 <th className="px-3 py-2 text-right">PnL A</th>
@@ -51,19 +51,19 @@ export default function GroupsPage() {
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-500">加载中...</td></tr>
+                <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-500 dark:text-gray-400">加载中...</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-500">暂无数据。先监控一段时间积累 block 分析</td></tr>
+                <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-500 dark:text-gray-400">暂无数据。先监控一段时间积累 block 分析</td></tr>
               ) : (
                 rows.map((r, idx) => (
-                  <tr key={`${r.addr_a}-${r.addr_b}-${idx}`} className="border-b border-gray-100 dark:border-zinc-700/50">
+                  <tr key={`${r.addr_a}-${r.addr_b}-${idx}`} className="border-b border-gray-100 dark:border-gray-700/50">
                     <td className="px-3 py-2"><AddressCopy address={r.addr_a} length={4} /></td>
                     <td className="px-3 py-2 text-right"><SolAmount value={r.pnl_a} signed /></td>
                     <td className="px-3 py-2"><AddressCopy address={r.addr_b} length={4} /></td>
                     <td className="px-3 py-2 text-right"><SolAmount value={r.pnl_b} signed /></td>
-                    <td className="px-3 py-2 text-center font-mono">{r.shared_mints}</td>
-                    <td className="px-3 py-2 text-center font-mono">{r.co_occurrences}</td>
-                    <td className="px-3 py-2 text-right font-mono text-xs">{r.last_slot}</td>
+                    <td className="px-3 py-2 text-center font-mono text-gray-800 dark:text-white/90">{r.shared_mints}</td>
+                    <td className="px-3 py-2 text-center font-mono text-gray-800 dark:text-white/90">{r.co_occurrences}</td>
+                    <td className="px-3 py-2 text-right font-mono text-xs text-gray-500 dark:text-gray-400">{r.last_slot}</td>
                   </tr>
                 ))
               )}
