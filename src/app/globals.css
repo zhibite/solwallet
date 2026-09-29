@@ -276,7 +276,7 @@
 }
 
 .dark .custom-scrollbar::-webkit-scrollbar-thumb {
-  background-color: #344054;
+  background-color: #3f3f46;
 }
 
 
@@ -302,7 +302,7 @@
 }
 
 .apexcharts-tooltip.apexcharts-theme-light {
-  @apply gap-1 !rounded-lg !border-gray-200 p-3 !shadow-theme-sm dark:!border-gray-800 dark:!bg-zinc-900;
+  @apply gap-1 !rounded-lg !border-gray-200 p-3 !shadow-theme-sm dark:!border-gray-800 dark:!bg-zinc-800;
 }
 
 .apexcharts-legend-text {
@@ -332,7 +332,7 @@
   @apply w-full;
 }
 .flatpickr-calendar {
-  @apply mt-2 !bg-white !rounded-xl !p-5 !border !border-gray-200 dark:!border-gray-800 !text-gray-500 dark:!bg-zinc-900 dark:!text-gray-400 dark:!shadow-theme-xl 2xsm:!w-auto;
+  @apply mt-2 !bg-white !rounded-xl !p-5 !border !border-gray-200 dark:!border-gray-800 !text-gray-500 dark:!bg-zinc-800 dark:!text-gray-400 dark:!shadow-theme-xl 2xsm:!w-auto;
 }
 
 .flatpickr-months .flatpickr-prev-month:hover svg,
@@ -362,7 +362,7 @@
 }
 
 .flatpickr-calendar {
-  @apply mt-2 !bg-white !rounded-xl !p-5 !shadow-none !border !border-gray-200 dark:!border-white/5 !text-gray-500 dark:!bg-zinc-900 dark:!text-gray-400 dark:!shadow-theme-xl 2xsm:!w-auto;
+  @apply mt-2 !bg-white !rounded-xl !p-5 !shadow-none !border !border-gray-200 dark:!border-white/5 !text-gray-500 dark:!bg-zinc-800 dark:!text-gray-400 dark:!shadow-theme-xl 2xsm:!w-auto;
 }
 
 @media (max-width: 525px) {
@@ -538,7 +538,7 @@ span.flatpickr-weekday,
   @apply !text-lg !font-medium text-gray-800 dark:text-white/90;
 }
 .fc-header-toolbar.fc-toolbar .fc-toolbar-chunk:last-child {
-  @apply rounded-lg bg-gray-100 p-0.5 dark:bg-zinc-900;
+  @apply rounded-lg bg-gray-100 p-0.5 dark:bg-zinc-700;
 }
 .fc-header-toolbar.fc-toolbar .fc-toolbar-chunk:last-child .fc-button {
   @apply !h-auto !w-auto rounded-md !border-0 bg-transparent !px-5 !py-2 text-sm font-medium text-gray-500 hover:text-gray-700 focus:shadow-none! dark:text-gray-400;
@@ -549,7 +549,7 @@ span.flatpickr-weekday,
   @apply text-gray-900 bg-white dark:bg-zinc-800 dark:text-white;
 }
 .fc-theme-standard th {
-  @apply !border-x-0 border-t !border-gray-200 bg-gray-50 !text-left dark:!border-gray-800 dark:bg-zinc-900;
+  @apply !border-x-0 border-t !border-gray-200 bg-gray-50 !text-left dark:!border-gray-800 dark:bg-zinc-700/50;
 }
 .fc-theme-standard td,
 .fc-theme-standard .fc-scrollgrid {
@@ -651,7 +651,7 @@ span.flatpickr-weekday,
 
 .stocks-slider-outer .swiper-button-next.swiper-button-disabled,
 .stocks-slider-outer .swiper-button-prev.swiper-button-disabled {
-  @apply bg-white opacity-50 dark:bg-zinc-900;
+  @apply bg-white opacity-50 dark:bg-zinc-800;
 }
 
 .stocks-slider-outer .swiper-button-next svg,
@@ -709,7 +709,7 @@ span.flatpickr-weekday,
 }
 
 .jvectormap-container {
-  @apply !bg-gray-50 dark:!bg-zinc-900;
+  @apply !bg-gray-50 dark:!bg-zinc-800;
 }
 .jvectormap-region.jvectormap-element {
   @apply !fill-gray-300 hover:!fill-brand-500 dark:!fill-gray-700 dark:hover:!fill-brand-500;

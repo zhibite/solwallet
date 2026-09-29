@@ -26,8 +26,8 @@ const DropzoneComponent: React.FC = () => {
           className={`dropzone rounded-xl   border-dashed border-gray-300 p-7 lg:p-10
         ${
           isDragActive
-            ? "border-brand-500 bg-gray-100 dark:bg-zinc-800"
-            : "border-gray-300 bg-gray-50 dark:border-gray-700 dark:bg-zinc-900"
+            ? "border-brand-500 bg-gray-100 dark:bg-zinc-700"
+            : "border-gray-300 bg-gray-50 dark:border-gray-700 dark:bg-zinc-800"
         }
       `}
           id="demo-upload"

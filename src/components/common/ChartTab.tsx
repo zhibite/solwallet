@@ -11,7 +11,7 @@ const ChartTab: React.FC = () => {
       : "text-gray-500 dark:text-gray-400";
 
   return (
-    <div className="flex items-center gap-0.5 rounded-lg bg-gray-100 p-0.5 dark:bg-zinc-900">
+    <div className="flex items-center gap-0.5 rounded-lg bg-gray-100 p-0.5 dark:bg-zinc-700">
       <button
         onClick={() => setSelected("optionOne")}
         className={`px-3 py-2 font-medium w-full rounded-md text-theme-sm hover:text-gray-900   dark:hover:text-white ${getButtonClass(

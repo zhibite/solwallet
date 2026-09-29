@@ -27,7 +27,7 @@ export default function FullScreenModal() {
         isFullscreen={true}
         showCloseButton={true}
       >
-        <div className="fixed top-0 left-0 flex flex-col justify-between w-full h-screen p-6 overflow-x-hidden overflow-y-auto bg-white dark:bg-zinc-900 lg:p-10">
+        <div className="fixed top-0 left-0 flex flex-col justify-between w-full h-screen p-6 overflow-x-hidden overflow-y-auto bg-white dark:bg-zinc-800 lg:p-10">
           <div>
             <h4 className="font-semibold text-gray-800 mb-7 text-title-sm dark:text-white/90">
               Modal Heading
