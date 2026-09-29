@@ -11,7 +11,7 @@
  */
 
 import { query, queryOne, withTransaction } from './db';
-import { getHelius } from './helius';
+import { getHelius, isHeliusConfigured } from './helius';
 import { parseHeliusTx } from './parser';
 import { saveBlockAnalysis } from './first-sniper';
 
@@ -27,6 +27,13 @@ export async function startMonitor() {
   if (running) return;
   running = true;
   console.log('[monitor] starting');
+
+  // 0) 检查 Helius key
+  if (!isHeliusConfigured()) {
+    console.warn('[monitor] HELIUS_API_KEY 未配置，监控功能已禁用（数据查询仍可用）');
+    console.warn('[monitor] 申请地址: https://dashboard.helius.dev');
+    return;
+  }
 
   // 1) 注册 Helius Webhook
   if (process.env.HELIUS_USE_WEBHOOK === 'true' && WEBHOOK_URL) {

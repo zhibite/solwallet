@@ -43,10 +43,11 @@ async function tryConnectRedis(): Promise<void> {
     // 动态 require 避免未安装时报错
     const IORedis = (await import('ioredis')).default;
     const client = new IORedis(url, {
-      maxRetriesPerRequest: 2,
-      retryStrategy: (times) => Math.min(times * 200, 2000),
-      enableOfflineQueue: false,
-      connectTimeout: 3000,
+      maxRetriesPerRequest: 3,
+      retryStrategy: (times) => Math.min(times * 500, 5000),
+      enableOfflineQueue: true,
+      lazyConnect: false,
+      connectTimeout: 5000,
     }) as any;
     client.on('error', (err: any) => {
       if (redisEnabled) console.warn('[cache] redis error:', err.message);

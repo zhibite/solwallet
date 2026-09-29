@@ -105,6 +105,11 @@ export class HeliusClient {
   }
 }
 
+/** Helius 是否已配置（用于判断是否启动监控） */
+export function isHeliusConfigured(): boolean {
+  return !!process.env.HELIUS_API_KEY;
+}
+
 /** 全局 Helius 客户端（按需创建） */
 let _helius: HeliusClient | null = null;
 export function getHelius(): HeliusClient {
