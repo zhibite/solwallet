@@ -26,6 +26,7 @@ export default function MonitorList() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'paused'>('all');
+  const [busy, setBusy] = useState<null | 'cleanup' | 'clearAll'>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -71,6 +72,35 @@ export default function MonitorList() {
     load();
   };
 
+  const handleCleanup = async () => {
+    if (!confirm('清理 30 天前的旧记录？此操作不可撤销')) return;
+    setBusy('cleanup');
+    try {
+      const res = await fetch('/api/targets/cleanup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const json = await res.json();
+      if (json.ok) alert(`已清理 ${json.deleted} 条旧记录`);
+      else alert(`失败: ${json.error}`);
+      await load();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleClearAll = async () => {
+    if (!confirm('清空所有监控记录？此操作不可撤销')) return;
+    if (!confirm('再次确认：会删除全部 target_trades，确定继续？')) return;
+    setBusy('clearAll');
+    try {
+      const res = await fetch('/api/targets/clear-all', { method: 'POST' });
+      const json = await res.json();
+      if (json.ok) alert(`已清空 ${json.deleted} 条记录`);
+      else alert(`失败: ${json.error}`);
+      await load();
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const filtered = targets.filter((t) => statusFilter === 'all' || t.status === statusFilter);
 
   return (
@@ -83,17 +113,41 @@ export default function MonitorList() {
         <StatCard label="已分析" value={stats?.analyzed ?? '-'} />
       </div>
 
-      {/* 添加目标 */}
+      {/* 添加目标 + 全局操作 */}
       <AddTargetForm onAdd={handleAdd} />
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-sm">
+          <span className="font-medium text-gray-800 dark:text-white/90">监控列表</span>
+          <span className="text-xs text-gray-500 dark:text-gray-400">共 {filtered.length} 个</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => load()}
+            className="h-8 px-3 rounded-lg bg-slate-100 dark:bg-zinc-700 hover:bg-slate-200 dark:hover:bg-zinc-600 text-gray-600 dark:text-gray-300 text-xs"
+          >
+            刷新
+          </button>
+          <button
+            onClick={handleCleanup}
+            disabled={busy !== null}
+            className="h-8 px-3 rounded-lg bg-slate-100 dark:bg-zinc-700 hover:bg-slate-200 dark:hover:bg-zinc-600 text-gray-600 dark:text-gray-300 text-xs disabled:opacity-50"
+          >
+            {busy === 'cleanup' ? '清理中...' : '清理旧记录'}
+          </button>
+          <button
+            onClick={handleClearAll}
+            disabled={busy !== null}
+            className="h-8 px-3 rounded-lg bg-error-500/10 hover:bg-error-500/20 text-error-600 dark:text-error-400 text-xs disabled:opacity-50"
+          >
+            {busy === 'clearAll' ? '清空中...' : '清空全部记录'}
+          </button>
+        </div>
+      </div>
 
       {/* 列表 */}
       <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
         <div className="flex items-center justify-between p-3 border-b border-gray-200 dark:border-gray-700">
-          <div className="flex items-center gap-2 text-sm">
-            <span className="font-medium text-gray-800 dark:text-white/90">监控列表</span>
-            <span className="text-xs text-gray-500 dark:text-gray-400">共 {filtered.length} 个</span>
-          </div>
-          <div className="flex items-center gap-1 text-xs">
+          <div className="flex items-center gap-2 text-xs">
             {(['all', 'active', 'paused'] as const).map((f) => (
               <button
                 key={f}
@@ -118,15 +172,16 @@ export default function MonitorList() {
                 <th className="px-3 py-2 text-left font-medium">状态</th>
                 <th className="px-3 py-2 text-center font-medium">记录数</th>
                 <th className="px-3 py-2 text-left font-medium">最新 buy</th>
-                <th className="px-3 py-2 text-left font-medium">最近狙击者</th>
+                <th className="px-3 py-2 text-left font-medium">距现在</th>
+                <th className="px-3 py-2 text-left font-medium">最近一次 第一个狙击者</th>
                 <th className="px-3 py-2 text-left font-medium">操作</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={7} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">加载中...</td></tr>
+                <tr><td colSpan={8} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">加载中...</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={7} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">暂无监控目标</td></tr>
+                <tr><td colSpan={8} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">暂无监控目标</td></tr>
               ) : (
                 filtered.map((t) => (
                   <TargetRow

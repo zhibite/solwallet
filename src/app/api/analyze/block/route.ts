@@ -1,7 +1,7 @@
 /**
  * /api/analyze/block
  * POST - 手动重跑某个 slot/mint 的 block 级分析
- * body: { slot, mint }
+ * body: { slot, mint, targetSig }
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { analyzeBlock, saveBlockAnalysis } from '@/lib/first-sniper';
@@ -12,10 +12,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: 'slot/mint 必填' }, { status: 400 });
   }
   try {
-    const buyers = await analyzeBlock(slot, mint, targetSig);
+    const result = await analyzeBlock(slot, mint, targetSig);
     const blockTime = new Date().toISOString();
-    const analysisId = await saveBlockAnalysis(slot, mint, targetSig || '', blockTime, buyers);
-    return NextResponse.json({ ok: true, analysisId, count: buyers.length });
+    const analysisId = await saveBlockAnalysis(slot, mint, targetSig || '', blockTime, result);
+    return NextResponse.json({
+      ok: true,
+      analysisId,
+      count: result.buyers.length,
+      sameSlotCount: result.sameSlotCount,
+      nextSlotCount: result.nextSlotCount,
+    });
   } catch (err: any) {
     return NextResponse.json({ ok: false, error: err.message }, { status: 500 });
   }

@@ -140,7 +140,9 @@ export function parseHeliusTx(tx: HeliusEnhancedTx): ParsedBuy | null {
   return {
     signature: tx.signature,
     slot: tx.slot,
-    blockTime: tx.blockTime,
+    // Helius Enhanced Webhook 推送的 payload 用 timestamp 字段（Unix 秒），
+    // 而 Enhanced Transactions API / RPC parse 返回 blockTime。这里兼容两者。
+    blockTime: (tx as any).blockTime ?? (tx as any).timestamp ?? 0,
     address: tx.feePayer,
     mint,
     buySol: calcBuySol(tx),

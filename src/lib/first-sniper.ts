@@ -1,6 +1,6 @@
 /**
  * 第一个狙击者识别 & 跟随者分析
- * 给定某个目标地址的一笔 buy，找出同 slot 内买入同 mint 的所有交易，
+ * 给定某个目标地址的一笔 buy，找出同 slot 与下一 slot 内买入同 mint 的所有交易，
  * 然后识别第一个狙击者（最早买入的）、跟随者、自己账号。
  */
 
@@ -10,14 +10,11 @@ import { getRPC } from './solana-rpc';
 import { parseHeliusTx, parseBlockTxs, type ParsedBuy } from './parser';
 import type { BlockBuyer } from './types';
 
-/**
- * 对一个目标交易做 block 级深度分析
- * - 同 slot 内买入同 mint 的所有交易
- * - 同 slot + 下一 slot 也算（用于找跟随者）
- */
-export async function analyzeBlock(slot: number, mint: string, targetSig: string): Promise<{
+export interface AnalyzeBuyer {
   blockIndex: number;
-  offsetMs: number;
+  offsetPos: number | null;     // 相对目标的块内位置差（同 slot），跨 slot 为 null
+  offsetMs: number;             // 相对目标的时间偏移（ms）
+  slotOffset: 0 | 1;            // 0 = 同 slot, 1 = 下一 slot
   signature: string;
   address: string;
   buySol: number;
@@ -27,9 +24,32 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
   version: string;
   isBundled: boolean;
   mark: 'first_sniper' | 'target' | 'follower' | 'own' | 'pre_target';
-}[]> {
+}
+
+export interface AnalyzeResult {
+  buyers: AnalyzeBuyer[];
+  /** 目标 tx 在 block 内的位置索引（块内第 N 笔，从 0 开始） */
+  targetBlockIndex: number | null;
+  sameSlotCount: number;
+  nextSlotCount: number;
+}
+
+/**
+ * 对一个目标交易做 block 级深度分析
+ * - 同 slot 内买入同 mint 的所有交易
+ * - 下一 slot 内买入同 mint 的交易（跟随者可能落在 slot+1）
+ */
+export async function analyzeBlock(slot: number, mint: string, targetSig: string): Promise<AnalyzeResult> {
   const rpc = getRPC();
   const helius = getHelius();
+
+  // 0) 默认空结果
+  const emptyResult: AnalyzeResult = {
+    buyers: [],
+    targetBlockIndex: null,
+    sameSlotCount: 0,
+    nextSlotCount: 0,
+  };
 
   // 1) 先获取目标交易详细信息（建立时间基准）
   let targetBlockTime = 0;
@@ -48,22 +68,38 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
     targetBlockTime = targetBuy.blockTime;
   }
 
-  // 2) 拉取整个 slot 的交易
+  // 2) 拉取当前 slot 的交易
   let block;
   try {
     block = await rpc.getBlock(slot, { transactionDetails: 'full' });
   } catch (err) {
     console.error('[analyzeBlock] getBlock failed', err);
-    return [];
+    return emptyResult;
   }
-  if (!block) return [];
+  if (!block) return emptyResult;
 
-  // 3) 解析出所有买入 mint 的 tx
-  const allBuys = parseBlockTxs(block, mint);
+  // 3) 解析出所有买入 mint 的 tx（同 slot）
+  const sameSlotBuys = parseBlockTxs(block, mint);
 
-  // 4) 用 Helius 增强补充 TIP 和 PRIO（批量）
-  const sigs = allBuys.map((b) => b.signature);
-  let enhancedMap = new Map<string, ReturnType<typeof parseHeliusTx>>();
+  // 4) 尝试拉取下一 slot 的交易（跟随者通常落在 slot+1）
+  let nextSlotBuys: ParsedBuy[] = [];
+  try {
+    const nextBlock = await rpc.getBlock(slot + 1, { transactionDetails: 'full' });
+    if (nextBlock) {
+      nextSlotBuys = parseBlockTxs(nextBlock, mint);
+    }
+  } catch (err) {
+    // 下一 slot 可能尚未确认/已跳过，静默失败
+    console.warn('[analyzeBlock] getBlock next slot failed', err);
+  }
+
+  // 5) 用 Helius 增强补充 TIP 和 PRIO（批量）— 含两个 slot 的 sigs
+  const allRawBuys = [
+    ...sameSlotBuys.map((b) => ({ ...b, _slot: slot })),
+    ...nextSlotBuys.map((b) => ({ ...b, _slot: slot + 1 })),
+  ];
+  const sigs = allRawBuys.map((b) => b.signature);
+  let enhancedMap = new Map<string, NonNullable<ReturnType<typeof parseHeliusTx>>>();
   if (sigs.length > 0 && sigs.length <= 100) {
     try {
       const enhancedList = await helius.parseTransactions(sigs);
@@ -77,61 +113,88 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
     }
   }
 
-  // 5) 取自己的钱包列表
+  // 6) 取自己的钱包列表
   const ownWallets = (await query<{ address: string }>('SELECT address FROM own_wallets')).map((w) => w.address);
   const ownSet = new Set(ownWallets);
 
-  // 6) 排序：block 内顺序（默认就是数组顺序），offsetMs 用 blockTime 估算
-  const enriched = allBuys.map((b) => {
+  // 7) 合并并排序：同 slot 按 blockIndex 升序，跨 slot 时同 slot 在前
+  type Enriched = { buy: ParsedBuy; slot: number; slotOffset: 0 | 1; offsetMs: number; enrichedBuy: NonNullable<ReturnType<typeof parseHeliusTx>> | ParsedBuy };
+  const enriched: Enriched[] = allRawBuys.map((b) => {
     const e = enhancedMap.get(b.signature);
     return {
       buy: e ?? b,
+      slot: b._slot,
+      slotOffset: b._slot === slot ? 0 : 1,
       offsetMs: targetBlockTime ? (b.blockTime - targetBlockTime) * 1000 : 0,
+      enrichedBuy: e ?? b,
     };
   });
 
-  // 7) 给每笔打标
-  // 第一个狙击者 = 在目标之前的最早买入
-  // 跟随者 = 目标之后的买入
-  // 我的账号 = ownSet
-  // 前置 = 在目标之前但不是第一个狙击者
+  // 同 slot 内：维持 getBlock 返回顺序（≈ block_index）。跨 slot 的排在后。
+  // 给每笔打一个统一 block_index
+  const ordered = [...enriched].sort((a, b) => {
+    if (a.slotOffset !== b.slotOffset) return a.slotOffset - b.slotOffset;
+    // 同 slot 内按 enhanced 数组原顺序（即 parseBlockTxs 输出顺序）保持
+    return enriched.indexOf(a) - enriched.indexOf(b);
+  });
+
+  // 8) 找出目标的 block_index
+  const targetEntryIdx = ordered.findIndex((e) => e.buy.signature === targetSig);
+  const targetBlockIndex = targetEntryIdx >= 0 ? targetEntryIdx : null;
+
+  // 9) 给每笔打标 + 计算 offsetPos
   let firstSniperMarked = false;
-  const result = enriched
-    .sort((a, b) => a.offsetMs - b.offsetMs)
-    .map(({ buy, offsetMs }, idx) => {
-      let mark: 'first_sniper' | 'target' | 'follower' | 'own' | 'pre_target';
-      if (buy.signature === targetSig) {
-        mark = 'target';
-      } else if (ownSet.has(buy.address)) {
-        mark = 'own';
-      } else if (offsetMs < 0) {
-        // 在目标之前
-        if (!firstSniperMarked) {
-          mark = 'first_sniper';
-          firstSniperMarked = true;
-        } else {
-          mark = 'pre_target';
-        }
+  const buyers: AnalyzeBuyer[] = ordered.map((e, idx) => {
+    let mark: AnalyzeBuyer['mark'];
+    if (e.buy.signature === targetSig) {
+      mark = 'target';
+    } else if (ownSet.has(e.buy.address)) {
+      mark = 'own';
+    } else if (e.slotOffset === 0 && idx < targetEntryIdx) {
+      // 同 slot 内、目标之前
+      if (!firstSniperMarked) {
+        mark = 'first_sniper';
+        firstSniperMarked = true;
       } else {
-        mark = 'follower';
+        mark = 'pre_target';
       }
+    } else {
+      // 同 slot 内目标之后，或下一 slot
+      mark = 'follower';
+    }
 
-      return {
-        blockIndex: idx,
-        offsetMs: Math.round(offsetMs),
-        signature: buy.signature,
-        address: buy.address,
-        buySol: buy.buySol,
-        tipSol: buy.tipSol,
-        prioLamports: buy.prioLamports,
-        result: buy.success ? ('success' as const) : ('failed' as const),
-        version: buy.version,
-        isBundled: buy.isBundled,
-        mark,
-      };
-    });
+    return {
+      blockIndex: idx,
+      offsetPos: e.slotOffset === 0 && targetBlockIndex !== null ? idx - targetBlockIndex : null,
+      offsetMs: Math.round(e.offsetMs),
+      slotOffset: e.slotOffset,
+      signature: e.buy.signature,
+      address: e.buy.address,
+      buySol: e.buy.buySol,
+      tipSol: e.buy.tipSol,
+      prioLamports: e.buy.prioLamports,
+      result: e.buy.success ? 'success' : 'failed',
+      version: e.buy.version,
+      isBundled: e.buy.isBundled,
+      mark,
+    };
+  });
 
-  return result;
+  // 如果 parser 漏掉了 target 那笔 buy，标记 first_sniper 为目标之前最早的
+  if (targetBlockIndex === null && buyers.length > 0) {
+    // 兜底：仍选同 slot 中目标之前的第一笔作为 first_sniper
+    // 这里我们无法知道目标在 block 中的精确位置，跳过
+  }
+
+  const sameSlotCount = buyers.filter((b) => b.slotOffset === 0).length;
+  const nextSlotCount = buyers.filter((b) => b.slotOffset === 1).length;
+
+  return {
+    buyers,
+    targetBlockIndex,
+    sameSlotCount,
+    nextSlotCount,
+  };
 }
 
 /** 通过签名查 buy 信息（DB 优先） */
@@ -166,11 +229,11 @@ export async function saveBlockAnalysis(
   mint: string,
   targetSig: string,
   blockTime: string,
-  buyers: Awaited<ReturnType<typeof analyzeBlock>>,
+  result: AnalyzeResult,
 ): Promise<number> {
   const { withTransaction } = await import('./db');
   return withTransaction(async (client) => {
-    // upsert block_analyses
+    // upsert block_analyses（含 target_block_index / counts）
     const existing = await client.query(
       'SELECT id FROM block_analyses WHERE slot = $1 AND mint = $2',
       [slot, mint],
@@ -179,28 +242,58 @@ export async function saveBlockAnalysis(
     if (existing.rowCount && existing.rowCount > 0) {
       analysisId = existing.rows[0].id;
       await client.query('DELETE FROM block_buyers WHERE block_analysis_id = $1', [analysisId]);
+      await client.query(
+        `UPDATE block_analyses
+           SET target_signature = $2,
+               block_time = $3,
+               target_block_index = $4,
+               same_slot_count = $5,
+               next_slot_count = $6
+         WHERE id = $1`,
+        [
+          analysisId,
+          targetSig,
+          blockTime,
+          result.targetBlockIndex,
+          result.sameSlotCount,
+          result.nextSlotCount,
+        ],
+      );
     } else {
       const ins = await client.query(
-        `INSERT INTO block_analyses (slot, mint, target_signature, block_time)
-         VALUES ($1, $2, $3, $4) RETURNING id`,
-        [slot, mint, targetSig, blockTime],
+        `INSERT INTO block_analyses (
+           slot, mint, target_signature, block_time,
+           target_block_index, same_slot_count, next_slot_count
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+        [
+          slot,
+          mint,
+          targetSig,
+          blockTime,
+          result.targetBlockIndex,
+          result.sameSlotCount,
+          result.nextSlotCount,
+        ],
       );
       analysisId = ins.rows[0].id;
     }
 
     // 插入每个 buyer
-    for (const b of buyers) {
+    for (const b of result.buyers) {
       await client.query(
         `INSERT INTO block_buyers (
-           block_analysis_id, slot, block_index, offset_ms, signature, address,
-           buy_sol, tip_sol, prio_lamports, is_first_sniper, is_follower, is_own, is_pre_target,
+           block_analysis_id, slot, block_index, offset_pos, offset_ms, slot_offset,
+           signature, address, buy_sol, tip_sol, prio_lamports,
+           is_first_sniper, is_follower, is_own, is_pre_target,
            result, version, is_bundled
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
         [
           analysisId,
-          slot,
+          b.slotOffset === 0 ? slot : slot + 1,
           b.blockIndex,
+          b.offsetPos,
           b.offsetMs,
+          b.slotOffset,
           b.signature,
           b.address,
           b.buySol,
@@ -222,7 +315,7 @@ export async function saveBlockAnalysis(
 
 /** 从 DB 读出 block 分析 */
 export async function getBlockAnalysis(slot: number, mint: string): Promise<{
-  analysis: { id: number; slot: number; mint: string; target_signature: string; block_time: string };
+  analysis: { id: number; slot: number; mint: string; target_signature: string; block_time: string; target_block_index: number | null; same_slot_count: number; next_slot_count: number };
   buyers: BlockBuyer[];
 } | null> {
   const a = await queryOne<any>('SELECT * FROM block_analyses WHERE slot = $1 AND mint = $2', [slot, mint]);

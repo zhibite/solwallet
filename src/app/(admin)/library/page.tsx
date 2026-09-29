@@ -13,18 +13,38 @@ interface Row {
   trade_count: number;
 }
 
+interface Stats {
+  activeTargets: number;
+  recordedBuys: number;
+  pending: number;
+  analyzed: number;
+}
+
+interface OwnWallet {
+  id: number;
+  address: string;
+  label: string | null;
+}
+
 export default function LibraryPage() {
   const [rows, setRows] = useState<Row[]>([]);
+  const [stats, setStats] = useState<Stats | null>(null);
+  const [ownWallets, setOwnWallets] = useState<OwnWallet[]>([]);
   const [loading, setLoading] = useState(true);
   const [newAddress, setNewAddress] = useState('');
   const [newLabel, setNewLabel] = useState('');
 
   const load = () => {
     setLoading(true);
-    fetch('/api/library')
-      .then((r) => r.json())
-      .then((j) => { if (j.ok) setRows(j.data); })
-      .finally(() => setLoading(false));
+    Promise.all([
+      fetch('/api/library').then((r) => r.json()),
+      fetch('/api/stats').then((r) => r.json()),
+      fetch('/api/wallets').then((r) => r.json()),
+    ]).then(([lib, st, ow]) => {
+      if (lib.ok) setRows(lib.data);
+      if (st.ok) setStats(st.data);
+      if (ow.ok) setOwnWallets(ow.data);
+    }).finally(() => setLoading(false));
   };
 
   useEffect(load, []);
@@ -47,11 +67,46 @@ export default function LibraryPage() {
     load();
   };
 
+  const removeOwn = async (id: number) => {
+    if (!confirm('删除此跟单钱包？')) return;
+    await fetch(`/api/wallets?id=${id}`, { method: 'DELETE' });
+    load();
+  };
+
   return (
     <div className="space-y-4">
       <div>
         <h1 className="text-xl font-semibold text-gray-800 dark:text-white/90">跟单库</h1>
         <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">已确认的聪明钱地址池，可批量导入 Helius 监控</p>
+      </div>
+
+      {/* 顶部统计卡 */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <StatCard label="监控中" value={stats?.activeTargets ?? '-'} />
+        <StatCard label="已记录 buy" value={stats?.recordedBuys ?? '-'} />
+        <StatCard label="待分析" value={stats?.pending ?? '-'} />
+        <StatCard label="已分析" value={stats?.analyzed ?? '-'} />
+      </div>
+
+      {/* 我的钱包 */}
+      <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-sm font-semibold text-gray-800 dark:text-white/90">我的钱包</h2>
+          <span className="text-xs text-gray-500 dark:text-gray-400">用于跟单时识别「我的账号」</span>
+        </div>
+        {ownWallets.length === 0 ? (
+          <p className="text-xs text-gray-400">尚未添加，到 设置 → 自己钱包 添加</p>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {ownWallets.map((w) => (
+              <div key={w.id} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-warning-50 dark:bg-warning-500/10 border border-warning-200 dark:border-warning-500/30">
+                <AddressCopy address={w.address} length={6} />
+                {w.label && <span className="text-xs text-gray-500 dark:text-gray-400">({w.label})</span>}
+                <button onClick={() => removeOwn(w.id)} className="text-xs text-gray-400 hover:text-error-500">×</button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 p-4">
@@ -121,6 +176,15 @@ export default function LibraryPage() {
           </table>
         </div>
       </div>
+    </div>
+  );
+}
+
+function StatCard({ label, value }: { label: string; value: number | string }) {
+  return (
+    <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+      <div className="text-xs text-gray-500 dark:text-gray-400">{label}</div>
+      <div className="text-2xl font-semibold mt-1 text-gray-800 dark:text-white/90">{value}</div>
     </div>
   );
 }

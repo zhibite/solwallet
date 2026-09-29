@@ -114,19 +114,19 @@ async function pollAllTargets() {
 export async function ingestTargetTrade(targetId: number, buy: any, rawTx: any) {
   const { saveBlockAnalysis, analyzeBlock } = await import('./first-sniper');
 
-  // 1) 写 target_trades
+  // 1) 写 target_trades（COALESCE 兜底，防止 blockTime 为 0/undefined 时 to_timestamp 失败）
   const inserted = await queryOne<{ id: number }>(`
     INSERT INTO target_trades (
       target_id, signature, slot, block_time, mint, target_address,
       buy_sol, target_tip_sol, target_prio_lamports, is_bundled, version
-    ) VALUES ($1,$2,$3,to_timestamp($4),$5,$6,$7,$8,$9,$10,$11)
+    ) VALUES ($1,$2,$3,to_timestamp(COALESCE(NULLIF($4, 0), EXTRACT(epoch FROM NOW()))),$5,$6,$7,$8,$9,$10,$11)
     ON CONFLICT (signature) DO UPDATE SET slot = EXCLUDED.slot
     RETURNING id
   `, [
     targetId,
     buy.signature,
     buy.slot,
-    buy.blockTime,
+    buy.blockTime || 0,
     buy.mint,
     buy.address,
     buy.buySol,
@@ -141,25 +141,31 @@ export async function ingestTargetTrade(targetId: number, buy: any, rawTx: any) 
   // 2) 触发 block 级分析（异步，不阻塞）
   setImmediate(async () => {
     try {
-      const buyers = await analyzeBlock(buy.slot, buy.mint, buy.signature);
-      await saveBlockAnalysis(
-        buy.slot,
-        buy.mint,
-        buy.signature,
-        new Date(buy.blockTime * 1000).toISOString(),
-        buyers,
-      );
+      const analyzeResult = await analyzeBlock(buy.slot, buy.mint, buy.signature);
+      const blockTime = buy.blockTime
+        ? new Date(buy.blockTime * 1000).toISOString()
+        : new Date().toISOString();
+      await saveBlockAnalysis(buy.slot, buy.mint, buy.signature, blockTime, analyzeResult);
 
       // 识别第一个狙击者，更新 target_trades
-      const sniper = buyers.find((b) => b.mark === 'first_sniper');
+      const sniper = analyzeResult.buyers.find((b) => b.mark === 'first_sniper');
       if (sniper) {
         await query(
           `UPDATE target_trades
            SET first_sniper = $1, first_sniper_buy_sol = $2,
                first_sniper_tip_sol = $3, first_sniper_prio_lamports = $4,
-               first_sniper_signature = $5
+               first_sniper_signature = $5,
+               first_sniper_offset_pos = $7
            WHERE signature = $6`,
-          [sniper.address, sniper.buySol, sniper.tipSol, sniper.prioLamports, sniper.signature, buy.signature],
+          [
+            sniper.address,
+            sniper.buySol,
+            sniper.tipSol,
+            sniper.prioLamports,
+            sniper.signature,
+            buy.signature,
+            sniper.offsetPos,
+          ],
         );
       }
     } catch (err) {
@@ -210,18 +216,28 @@ export async function handleWebhookEvent(events: any[]) {
       const signature = ev.signature;
       if (!signature) continue;
 
-      // 找是否属于某个目标
+      // 优先按 feePayer 严格匹配（目标地址作为 buy 发起者）。
+      // 同时把 accountData 中的账户放进备选池，用于 fallback（如 v0 交易 feePayer 是 ALT 钱包）。
       const accountKeys: string[] = [
         ev.feePayer,
         ...(ev.accountData?.map((a: any) => a.account) ?? []),
         ...(ev.nativeTransfers?.flatMap((t: any) => [t.fromUserAccount, t.toUserAccount]) ?? []),
         ...(ev.tokenTransfers?.flatMap((t: any) => [t.fromUserAccount, t.toUserAccount]) ?? []),
       ];
-      const matches = await query<{ id: number; address: string; threshold_sol: string }>(
+      // 1) 严格匹配 feePayer
+      let matches = await query<{ id: number; address: string; threshold_sol: string }>(
         `SELECT id, address, threshold_sol FROM monitored_targets
-         WHERE status = 'active' AND address = ANY($1)`,
-        [accountKeys],
+         WHERE status = 'active' AND address = $1`,
+        [ev.feePayer],
       );
+      // 2) Fallback：如果 feePayer 不命中（罕见的 ALT/v0 场景），再用 accountKeys 池匹配
+      if (matches.length === 0) {
+        matches = await query<{ id: number; address: string; threshold_sol: string }>(
+          `SELECT id, address, threshold_sol FROM monitored_targets
+           WHERE status = 'active' AND address = ANY($1)`,
+          [accountKeys],
+        );
+      }
       if (matches.length === 0) continue;
 
       const buy = parseHeliusTx(ev);

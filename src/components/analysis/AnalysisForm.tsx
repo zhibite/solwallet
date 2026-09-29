@@ -1,5 +1,5 @@
 "use client";
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import AddressCopy from "@/components/common/AddressCopy";
 import SolAmount from "@/components/common/SolAmount";
 import RelativeTime from "@/components/common/RelativeTime";
@@ -17,6 +17,10 @@ interface Trade {
   tip: number;
   prio: number;
   txid: string;
+  /** 跟单目标地址（用户输入的地址），用来填「跟单目标」列 */
+  targetAddress?: string;
+  /** 跟单目标标签（如果系统库里有） */
+  targetLabel?: string | null;
 }
 
 interface AnalysisResult {
@@ -29,6 +33,8 @@ interface AnalysisResult {
   pending: number;
   trades: Trade[];
 }
+
+const PAGE_SIZE = 20;
 
 export default function AnalysisForm() {
   const [address, setAddress] = useState('');
@@ -43,6 +49,7 @@ export default function AnalysisForm() {
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<'all' | 'confirmed' | 'failed'>('all');
+  const [page, setPage] = useState(1);
   const [confirming, setConfirming] = useState(false);
 
   const analyze = async () => {
@@ -52,6 +59,7 @@ export default function AnalysisForm() {
     }
     setError(null);
     setLoading(true);
+    setPage(1);
     try {
       const res = await fetch('/api/analyze', {
         method: 'POST',
@@ -91,12 +99,24 @@ export default function AnalysisForm() {
     window.location.href = '/api/export?type=confirmed';
   };
 
-  const filteredTrades = result?.trades.filter((t) => {
-    if (filter === 'all') return true;
-    if (filter === 'confirmed') return t.status === 'confirmed';
-    if (filter === 'failed') return t.status === 'failed';
-    return true;
-  }) ?? [];
+  // 跟单目标展示：分析时目标就是用户输入的 address，标签从监控库查（简化用 address 自身）
+  const targetLabel = useMemo(() => {
+    if (!result || !address) return null;
+    return address.slice(0, 4) + '...' + address.slice(-4);
+  }, [result, address]);
+
+  const filteredTrades = useMemo(() => {
+    return result?.trades.filter((t) => {
+      if (filter === 'all') return true;
+      if (filter === 'confirmed') return t.status === 'confirmed';
+      if (filter === 'failed') return t.status === 'failed';
+      return true;
+    }) ?? [];
+  }, [result?.trades, filter]);
+
+  const totalFiltered = filteredTrades.length;
+  const totalPages = Math.max(1, Math.ceil(totalFiltered / PAGE_SIZE));
+  const pagedTrades = filteredTrades.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   return (
     <div className="space-y-4">
@@ -184,31 +204,36 @@ export default function AnalysisForm() {
 
           {/* 交易列表 */}
           <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
-            <div className="flex items-center gap-2 p-3 border-b border-gray-200 dark:border-gray-700 text-sm">
-              <button
-                onClick={() => setFilter('all')}
-                className={`px-3 py-1 rounded-xl text-xs ${
-                  filter === 'all' ? 'bg-brand-500 text-white' : 'bg-slate-100 dark:bg-zinc-700 text-gray-500 dark:text-gray-400 hover:bg-slate-200 dark:hover:bg-zinc-600'
-                }`}
-              >
-                全部 ({result.trades.length})
-              </button>
-              <button
-                onClick={() => setFilter('confirmed')}
-                className={`px-3 py-1 rounded-xl text-xs ${
-                  filter === 'confirmed' ? 'bg-success-500 text-white' : 'bg-slate-100 dark:bg-zinc-700 text-gray-500 dark:text-gray-400 hover:bg-slate-200 dark:hover:bg-zinc-600'
-                }`}
-              >
-                只看成功 ({result.confirmed})
-              </button>
-              <button
-                onClick={() => setFilter('failed')}
-                className={`px-3 py-1 rounded-xl text-xs ${
-                  filter === 'failed' ? 'bg-error-500 text-white' : 'bg-slate-100 dark:bg-zinc-700 text-gray-500 dark:text-gray-400 hover:bg-slate-200 dark:hover:bg-zinc-600'
-                }`}
-              >
-                只看失败 ({result.failed})
-              </button>
+            <div className="flex items-center justify-between gap-2 p-3 border-b border-gray-200 dark:border-gray-700 text-sm flex-wrap">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => { setFilter('all'); setPage(1); }}
+                  className={`px-3 py-1 rounded-xl text-xs ${
+                    filter === 'all' ? 'bg-brand-500 text-white' : 'bg-slate-100 dark:bg-zinc-700 text-gray-500 dark:text-gray-400 hover:bg-slate-200 dark:hover:bg-zinc-600'
+                  }`}
+                >
+                  全部 ({result.trades.length})
+                </button>
+                <button
+                  onClick={() => { setFilter('confirmed'); setPage(1); }}
+                  className={`px-3 py-1 rounded-xl text-xs ${
+                    filter === 'confirmed' ? 'bg-success-500 text-white' : 'bg-slate-100 dark:bg-zinc-700 text-gray-500 dark:text-gray-400 hover:bg-slate-200 dark:hover:bg-zinc-600'
+                  }`}
+                >
+                  只看成功 ({result.confirmed})
+                </button>
+                <button
+                  onClick={() => { setFilter('failed'); setPage(1); }}
+                  className={`px-3 py-1 rounded-xl text-xs ${
+                    filter === 'failed' ? 'bg-error-500 text-white' : 'bg-slate-100 dark:bg-zinc-700 text-gray-500 dark:text-gray-400 hover:bg-slate-200 dark:hover:bg-zinc-600'
+                  }`}
+                >
+                  只看失败 ({result.failed})
+                </button>
+              </div>
+              <span className="text-xs text-gray-500 dark:text-gray-400">
+                显示 {(page - 1) * PAGE_SIZE + (pagedTrades.length > 0 ? 1 : 0)} - {Math.min(page * PAGE_SIZE, totalFiltered)} / {totalFiltered}
+              </span>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -223,13 +248,14 @@ export default function AnalysisForm() {
                     <th className="px-3 py-2 text-right">优先级费</th>
                     <th className="px-3 py-2 text-left">TXID</th>
                     <th className="px-3 py-2 text-center">状态</th>
+                    <th className="px-3 py-2 text-left">跟单目标</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredTrades.length === 0 ? (
-                    <tr><td colSpan={9} className="px-3 py-6 text-center text-gray-500 dark:text-gray-400">无符合条件的交易</td></tr>
+                  {pagedTrades.length === 0 ? (
+                    <tr><td colSpan={10} className="px-3 py-6 text-center text-gray-500 dark:text-gray-400">无符合条件的交易</td></tr>
                   ) : (
-                    filteredTrades.map((t) => (
+                    pagedTrades.map((t) => (
                       <tr key={t.signature} className="border-b border-gray-100 dark:border-gray-700/50">
                         <td className="px-3 py-2"><RelativeTime iso={new Date(t.blockTime * 1000).toISOString()} /></td>
                         <td className="px-3 py-2 font-mono text-xs text-gray-500 dark:text-gray-400">{t.slot}</td>
@@ -257,12 +283,40 @@ export default function AnalysisForm() {
                             <span className="text-xs text-gray-400">pending</span>
                           )}
                         </td>
+                        <td className="px-3 py-2">
+                          <div className="flex items-center gap-1">
+                            <AddressCopy address={address} length={4} />
+                            {targetLabel && <span className="text-xs text-gray-400">{targetLabel}</span>}
+                          </div>
+                        </td>
                       </tr>
                     ))
                   )}
                 </tbody>
               </table>
             </div>
+            {/* 分页 */}
+            {totalPages > 1 && (
+              <div className="flex items-center justify-between px-3 py-2 border-t border-gray-200 dark:border-gray-700 text-xs text-gray-500 dark:text-gray-400">
+                <span>第 {page} / {totalPages} 页</span>
+                <div className="flex gap-1">
+                  <button
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={page === 1}
+                    className="px-2 py-1 rounded bg-slate-100 dark:bg-zinc-700 disabled:opacity-50 hover:bg-slate-200 dark:hover:bg-zinc-600"
+                  >
+                    上一页
+                  </button>
+                  <button
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={page === totalPages}
+                    className="px-2 py-1 rounded bg-slate-100 dark:bg-zinc-700 disabled:opacity-50 hover:bg-slate-200 dark:hover:bg-zinc-600"
+                  >
+                    下一页
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </>
       )}

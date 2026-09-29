@@ -3,7 +3,7 @@ import React, { useState, useEffect } from "react";
 import AddressCopy from "@/components/common/AddressCopy";
 import SolAmount from "@/components/common/SolAmount";
 import RelativeTime from "@/components/common/RelativeTime";
-import { ChevronDownIcon, ChevronUpIcon, TrashBinIcon, TimeIcon } from "@/icons";
+import { ChevronDownIcon, ChevronUpIcon } from "@/icons";
 import Link from "next/link";
 
 interface Target {
@@ -31,6 +31,8 @@ interface Trade {
   first_sniper_buy_sol: string | null;
   first_sniper_tip_sol: string | null;
   first_sniper_prio_lamports: number | null;
+  first_sniper_signature: string | null;
+  first_sniper_offset_pos: number | null;
   pnl_sol: string | null;
   status: string;
 }
@@ -75,6 +77,21 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
     if (Number.isNaN(n) || n < 0) return;
     await onThresholdChange(target.id, n);
     setEditingThreshold(false);
+  };
+
+  // 第一个狙击者信息（从最近一笔 buy 拿）
+  const latest = trades?.[0];
+
+  // 格式化"抱对 +X"展示
+  const renderOffset = (pos: number | null | undefined) => {
+    if (pos === null || pos === undefined) return null;
+    const sign = pos > 0 ? '+' : pos < 0 ? '' : '';
+    const color = pos > 0 ? 'text-error-500' : pos < 0 ? 'text-success-600' : 'text-gray-500';
+    return (
+      <span className={`font-mono ${color}`}>
+        抱对 {sign}{pos}
+      </span>
+    );
   };
 
   return (
@@ -123,16 +140,25 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
           <span className="font-mono text-xs">{target.record_count}</span>
         </td>
         <td className="px-3 py-3">
+          <span className="text-xs font-mono text-gray-600 dark:text-gray-400">
+            {target.last_buy_at ? new Date(target.last_buy_at).toLocaleString('zh-CN', { hour12: false }).slice(5) : '-'}
+          </span>
+        </td>
+        <td className="px-3 py-3">
           <RelativeTime iso={target.last_buy_at} />
         </td>
         <td className="px-3 py-3">
-          {trades && trades.length > 0 ? (
+          {latest && latest.first_sniper ? (
             <div className="text-xs space-y-0.5">
-              <AddressCopy address={trades[0].first_sniper || trades[0].mint} />
-              <div className="text-gray-500 dark:text-gray-400">
-                抢到 <SolAmount value={trades[0].first_sniper_buy_sol} signed /> / tip{' '}
-                <SolAmount value={trades[0].first_sniper_tip_sol} /> / prio{' '}
-                <span className="font-mono text-gray-500 dark:text-gray-400">{trades[0].first_sniper_prio_lamports || 0}</span>
+              <AddressCopy address={latest.first_sniper} />
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-gray-500 dark:text-gray-400">
+                {renderOffset(latest.first_sniper_offset_pos)}
+                <span>
+                  tip <SolAmount value={latest.first_sniper_tip_sol} />
+                </span>
+                <span className="font-mono">
+                  prio {latest.first_sniper_prio_lamports || 0}
+                </span>
               </div>
             </div>
           ) : (
@@ -141,6 +167,10 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
         </td>
         <td className="px-3 py-3">
           <div className="flex items-center gap-1 text-xs">
+            <button onClick={toggleExpand} className="text-gray-500 dark:text-gray-400 hover:text-brand-500">{expanded ? '收起' : '展开'}</button>
+            <span className="text-gray-300">|</span>
+            <button onClick={() => setEditingThreshold(true)} className="text-gray-500 dark:text-gray-400 hover:text-brand-500">阈值</button>
+            <span className="text-gray-300">|</span>
             {target.status === 'active' ? (
               <button onClick={() => onPause(target.id)} className="text-gray-500 dark:text-gray-400 hover:text-warning-500">暂停</button>
             ) : (
@@ -156,7 +186,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
 
       {expanded && (
         <tr>
-          <td colSpan={7} className="bg-gray-50 dark:bg-zinc-700/30 px-6 py-4">
+          <td colSpan={8} className="bg-gray-50 dark:bg-zinc-700/30 px-6 py-4">
             {loadingTrades ? (
               <div className="text-xs text-gray-500 dark:text-gray-400">加载中...</div>
             ) : !trades || trades.length === 0 ? (
@@ -197,6 +227,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                             <div className="flex flex-col gap-0.5">
                               <AddressCopy address={t.first_sniper} />
                               <SolAmount value={t.first_sniper_buy_sol} />
+                              {renderOffset(t.first_sniper_offset_pos)}
                             </div>
                           ) : <span className="text-gray-400">-</span>}
                         </td>

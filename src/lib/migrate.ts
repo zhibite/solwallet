@@ -1,13 +1,13 @@
 /**
- * 数据库迁移：自动执行 schema.sql
- * 使用一个简单的 migrations 表跟踪是否执行过
+ * 数据库迁移：按顺序执行 migrations 目录下的 .sql 文件
+ * 使用 _migrations 表跟踪已执行的迁移名
  */
 
 import { pool } from './db';
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 
-const MIGRATION_NAME = '0001_init_schema';
+const MIGRATIONS_DIR = join(process.cwd(), 'src', 'lib', 'migrations');
 
 export async function runMigrations(): Promise<void> {
   // 1) 确保 migrations 表存在
@@ -18,24 +18,40 @@ export async function runMigrations(): Promise<void> {
     );
   `);
 
-  // 2) 检查是否已应用
-  const existing = await pool.query('SELECT 1 FROM _migrations WHERE name = $1', [MIGRATION_NAME]);
-  if (existing.rowCount && existing.rowCount > 0) {
-    console.log('[migrate] already applied:', MIGRATION_NAME);
-    return;
-  }
-
-  // 3) 读取并执行 schema.sql
-  let sql: string;
+  // 2) 收集 migrations 文件
+  let files: string[];
   try {
-    const schemaPath = join(process.cwd(), 'src', 'lib', 'schema.sql');
-    sql = readFileSync(schemaPath, 'utf-8');
-  } catch (err) {
-    console.warn('[migrate] schema.sql not found, skipping');
+    files = readdirSync(MIGRATIONS_DIR)
+      .filter((f) => f.endsWith('.sql'))
+      .sort();
+  } catch {
+    console.log('[migrate] migrations dir not found, skipping');
     return;
   }
 
-  await pool.query(sql);
-  await pool.query('INSERT INTO _migrations (name) VALUES ($1)', [MIGRATION_NAME]);
-  console.log('[migrate] applied:', MIGRATION_NAME);
+  // 3) 检查已执行的
+  const applied = new Set(
+    (await pool.query<{ name: string }>('SELECT name FROM _migrations')).rows.map((r) => r.name),
+  );
+
+  // 4) 依次执行未执行的
+  for (const file of files) {
+    if (applied.has(file)) {
+      console.log('[migrate] skip (already applied):', file);
+      continue;
+    }
+    const sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf-8');
+    console.log('[migrate] applying:', file);
+    await pool.query('BEGIN');
+    try {
+      await pool.query(sql);
+      await pool.query('INSERT INTO _migrations (name) VALUES ($1)', [file]);
+      await pool.query('COMMIT');
+      console.log('[migrate] applied:', file);
+    } catch (err) {
+      await pool.query('ROLLBACK');
+      console.error('[migrate] failed:', file, err);
+      throw err;
+    }
+  }
 }

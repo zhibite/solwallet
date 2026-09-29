@@ -57,6 +57,12 @@ export interface BlockAnalysis {
   mint: string;
   target_signature: string;
   block_time: string;
+  /** 目标 tx 在 block 内的顺序索引 */
+  target_block_index: number | null;
+  /** 同一 slot 内同一 mint 的买入笔数 */
+  same_slot_count: number;
+  /** 下一个 slot 内同一 mint 的买入笔数 */
+  next_slot_count: number;
   created_at: string;
 }
 
@@ -64,8 +70,14 @@ export interface BlockBuyer {
   id: number;
   block_analysis_id: number;
   slot: number;
+  /** 在 block（含下一个 slot 合并后的）内的顺序索引 */
   block_index: number;
+  /** 相对目标 tx 的块内位置差（block_index - target_block_index）。下一 slot 行为 NULL */
+  offset_pos: number | null;
+  /** 相对目标 tx 的时间偏移（ms），保留字段主要做兼容 */
   offset_ms: number | null;
+  /** 0 = 同一 slot, 1 = 下一个 slot */
+  slot_offset: number;
   signature: string;
   address: string;
   buy_sol: string;

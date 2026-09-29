@@ -8,7 +8,9 @@ import RelativeTime from "@/components/common/RelativeTime";
 interface Buyer {
   id: number;
   block_index: number;
-  offset_ms: number;
+  offset_pos: number | null;
+  offset_ms: number | null;
+  slot_offset: number;
   signature: string;
   address: string;
   buy_sol: string;
@@ -30,6 +32,9 @@ interface Analysis {
   mint: string;
   target_signature: string;
   block_time: string;
+  target_block_index: number | null;
+  same_slot_count: number;
+  next_slot_count: number;
 }
 
 export default function BlockDetail() {
@@ -38,7 +43,7 @@ export default function BlockDetail() {
   const [buyers, setBuyers] = useState<Buyer[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [recalculating, setRecalculating] = useState<number | null>(null);
+  const [recalculating, setRecalculating] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -59,18 +64,21 @@ export default function BlockDetail() {
 
   useEffect(() => { load(); }, [params.slot, params.mint]);
 
-  const recalc = async (buyerId: number) => {
-    setRecalculating(buyerId);
+  const recalc = async () => {
+    setRecalculating(true);
     try {
-      // 简化：直接重跑 analyzeBlock 并刷新
       await fetch('/api/analyze/block', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ slot: parseInt(params.slot, 10), mint: params.mint }),
+        body: JSON.stringify({
+          slot: parseInt(params.slot, 10),
+          mint: params.mint,
+          targetSig: analysis?.target_signature,
+        }),
       });
       await load();
     } finally {
-      setRecalculating(null);
+      setRecalculating(false);
     }
   };
 
@@ -80,18 +88,19 @@ export default function BlockDetail() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ address, label: `from block ${params.slot}` }),
     });
-    alert(`已加入自己钱包: ${address.slice(0, 8)}...`);
+    alert(`已加入跟单钱包: ${address.slice(0, 8)}...`);
   };
 
   if (loading) return <div className="p-6 text-center text-gray-500 dark:text-gray-400">加载中...</div>;
   if (error) return <div className="p-6 text-center text-error-500">{error}</div>;
   if (!analysis) return null;
 
-  // 统计
-  const targetIdx = buyers.findIndex((b) => b.signature === analysis.target_signature);
-  const sameSlotCount = buyers.length;
-  const firstSniper = buyers.find((b) => b.is_first_sniper);
+  const targetIdx = analysis.target_block_index;
+  const sameSlotCount = analysis.same_slot_count || buyers.filter((b) => b.slot_offset === 0).length;
+  const nextSlotCount = analysis.next_slot_count || buyers.filter((b) => b.slot_offset === 1).length;
+  const totalCount = buyers.length;
   const myWallets = buyers.filter((b) => b.is_own);
+  const firstSniper = buyers.find((b) => b.is_first_sniper);
 
   return (
     <div className="space-y-4">
@@ -100,60 +109,74 @@ export default function BlockDetail() {
         <h1 className="text-lg font-semibold text-gray-800 dark:text-white/90 mb-3">
           Block 级深度分析
         </h1>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-          <div>
-            <span className="text-gray-500 dark:text-gray-400">目标交易：</span>
-            <span className="font-mono text-xs text-gray-800 dark:text-white/90">{analysis.target_signature}</span>
-          </div>
-          <div>
-            <span className="text-gray-500 dark:text-gray-400">MINT：</span>
-            <AddressCopy address={analysis.mint} length={6} />
-          </div>
-          <div>
-            <span className="text-gray-500 dark:text-gray-400">SLOT：</span>
-            <span className="font-mono text-gray-800 dark:text-white/90">{analysis.slot}</span>
+        <div className="text-sm text-gray-700 dark:text-gray-300 space-y-1.5">
+          <p>
+            目标{' '}
+            {(() => {
+              const target = buyers.find((b) => b.signature === analysis.target_signature);
+              return target ? <AddressCopy address={target.address} length={6} /> : <span className="font-mono text-xs">{analysis.target_signature.slice(0, 8)}...</span>;
+            })()}
+            {' '}在 slot{' '}
+            <span className="font-mono">{analysis.slot}</span>
+            {targetIdx !== null && (
+              <>
+                {' '}
+                (块内第 <span className="font-mono text-brand-500 font-semibold">{targetIdx + 1}</span> 笔) 买入{' '}
+              </>
+            )}
             <a
               href={`https://solscan.io/block/${analysis.slot}`}
               target="_blank"
               rel="noreferrer"
-              className="ml-2 text-brand-500 hover:underline text-xs"
+              className="ml-1 text-brand-500 hover:underline text-xs"
             >
-              在 Solscan 查看
+              solscan ↗
             </a>
-          </div>
-          <div>
-            <span className="text-gray-500 dark:text-gray-400">时间：</span>
-            <RelativeTime iso={analysis.block_time} />
-            <span className="ml-1 text-gray-400 text-xs">
-              ({new Date(analysis.block_time).toLocaleString()})
-            </span>
-          </div>
-        </div>
-
-        {/* 上下文统计 */}
-        <div className="mt-4 pt-3 border-t border-gray-200 dark:border-gray-700 text-xs text-gray-600 dark:text-gray-400">
-          <p>
-            <span className="font-semibold text-gray-800 dark:text-white/90">{sameSlotCount}</span> 笔交易 (含失败的) 在同一个 slot 内。
+          </p>
+          <p className="text-xs text-gray-600 dark:text-gray-400">
+            同一 slot 里 <span className="font-semibold text-gray-800 dark:text-white/90">{sameSlotCount}</span> 笔
+            {nextSlotCount > 0 && (
+              <>
+                ，下一个 slot 里 <span className="font-semibold text-gray-800 dark:text-white/90">{nextSlotCount}</span> 笔
+              </>
+            )}
+            ，共 <span className="font-semibold text-gray-800 dark:text-white/90">{totalCount}</span> 笔（含失败的）
             {myWallets.length > 0 && (
               <span className="ml-2">
-                我的账号排位: {myWallets.map((w) => `#${w.block_index + 1}`).join(', ')}
+                · 我的账号排位: {myWallets.map((w) => {
+                  const relPos = targetIdx !== null ? w.block_index - targetIdx : w.block_index + 1;
+                  return `#${w.block_index + 1} (${relPos > 0 ? '+' : ''}${relPos})`;
+                }).join(', ')}
               </span>
             )}
+          </p>
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            时间: <RelativeTime iso={analysis.block_time} />{' '}
+            <span className="text-gray-400">({new Date(analysis.block_time).toLocaleString()})</span>
           </p>
         </div>
       </div>
 
       {/* Block 内每笔交易 */}
       <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
-        <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
-          <h2 className="text-sm font-semibold text-gray-800 dark:text-white/90">Slot 内所有交易（{buyers.length} 笔）</h2>
+        <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-gray-800 dark:text-white/90">
+            Slot 内所有交易（{totalCount} 笔）
+          </h2>
+          <button
+            onClick={recalc}
+            disabled={recalculating}
+            className="text-xs px-3 py-1 rounded-lg bg-slate-100 dark:bg-zinc-700 hover:bg-slate-200 dark:hover:bg-zinc-600 text-gray-600 dark:text-gray-300 disabled:opacity-50"
+          >
+            {recalculating ? '算收益中...' : '算收益'}
+          </button>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-gray-50 dark:bg-zinc-700/50 text-xs text-gray-500 dark:text-gray-400">
               <tr>
                 <th className="px-3 py-2 text-left">块内序</th>
-                <th className="px-3 py-2 text-right">偏移 (ms)</th>
+                <th className="px-3 py-2 text-right">偏移</th>
                 <th className="px-3 py-2 text-left">标记</th>
                 <th className="px-3 py-2 text-left">地址</th>
                 <th className="px-3 py-2 text-right">买入 SOL</th>
@@ -169,6 +192,16 @@ export default function BlockDetail() {
             <tbody>
               {buyers.map((b) => {
                 const isTarget = b.signature === analysis.target_signature;
+                const offsetColor =
+                  b.slot_offset === 1
+                    ? 'text-purple-500'
+                    : b.offset_pos === null
+                      ? 'text-gray-500 dark:text-gray-400'
+                      : b.offset_pos > 0
+                        ? 'text-error-500'
+                        : b.offset_pos < 0
+                          ? 'text-success-600'
+                          : 'text-gray-500 dark:text-gray-400';
                 return (
                   <tr
                     key={b.id}
@@ -182,9 +215,18 @@ export default function BlockDetail() {
                             : ''
                     }`}
                   >
-                    <td className="px-3 py-2 font-mono text-xs text-gray-800 dark:text-white/90">{b.block_index + 1}</td>
-                    <td className={`px-3 py-2 text-right font-mono text-xs ${b.offset_ms > 0 ? 'text-error-500' : b.offset_ms < 0 ? 'text-success-600' : 'text-gray-500 dark:text-gray-400'}`}>
-                      {b.offset_ms > 0 ? '+' : ''}{b.offset_ms}
+                    <td className="px-3 py-2 font-mono text-xs text-gray-800 dark:text-white/90">
+                      {b.block_index + 1}
+                      {b.slot_offset === 1 && <span className="ml-1 text-purple-500" title="下一 slot">+1</span>}
+                    </td>
+                    <td className={`px-3 py-2 text-right font-mono text-xs ${offsetColor}`}>
+                      {b.slot_offset === 1
+                        ? 'slot+1'
+                        : b.offset_pos === null
+                          ? '0'
+                          : b.offset_pos > 0
+                            ? `+${b.offset_pos}`
+                            : b.offset_pos}
                     </td>
                     <td className="px-3 py-2">
                       {isTarget ? <Badge color="brand">目标</Badge> :
@@ -228,20 +270,13 @@ export default function BlockDetail() {
                     </td>
                     <td className="px-3 py-2 text-center">
                       <div className="flex items-center justify-center gap-2 text-xs">
-                        <button
-                          onClick={() => recalc(b.id)}
-                          className="text-gray-500 dark:text-gray-400 hover:text-brand-500"
-                          title="重算"
-                        >
-                          重算
-                        </button>
-                        {!b.is_own && (
+                        {!isTarget && !b.is_own && (
                           <button
                             onClick={() => setAsCopyTrader(b.address)}
                             className="text-gray-500 dark:text-gray-400 hover:text-success-500"
                             title="设为跟单者"
                           >
-                            +
+                            设为跟单者
                           </button>
                         )}
                       </div>
@@ -259,7 +294,8 @@ export default function BlockDetail() {
         <p className="font-medium mb-1">💡 复盘建议</p>
         <ul className="list-disc list-inside space-y-1">
           <li>看 <strong>第一个狙击者</strong> 的 TIP 和 PRIO，反推合理的抢单参数</li>
-          <li>对比 <strong>我的账号</strong> 的 offset，如果 +X ms 表示慢了几毫秒</li>
+          <li><strong>偏移</strong>列：正值（红）= 在目标之后多花了 N 笔 tx 才轮到他；负值（绿）= 抢先了 N 笔 tx</li>
+          <li><strong>slot+1</strong>（紫）= 跟随者落在了下一个 slot</li>
           <li>关注 <strong>跟随者</strong> 的 buy_sol，看市场跟随热度</li>
           <li><strong>失败</strong> 的交易会损失 priority fee + tip</li>
         </ul>
