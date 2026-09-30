@@ -69,9 +69,10 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
   }
 
   // 2) 拉取当前 slot 的交易
+  const slotNum = Number(slot);
   let block;
   try {
-    block = await rpc.getBlock(slot, { transactionDetails: 'full' });
+    block = await rpc.getBlock(slotNum, { transactionDetails: 'full' });
   } catch (err) {
     console.error('[analyzeBlock] getBlock failed', err);
     return emptyResult;
@@ -84,7 +85,7 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
   // 4) 尝试拉取下一 slot 的交易（跟随者通常落在 slot+1）
   let nextSlotBuys: ParsedBuy[] = [];
   try {
-    const nextBlock = await rpc.getBlock(slot + 1, { transactionDetails: 'full' });
+    const nextBlock = await rpc.getBlock(slotNum + 1, { transactionDetails: 'full' });
     if (nextBlock) {
       nextSlotBuys = parseBlockTxs(nextBlock, mint);
     }
@@ -95,8 +96,8 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
 
   // 5) 用 Helius 增强补充 TIP 和 PRIO（批量）— 含两个 slot 的 sigs
   const allRawBuys = [
-    ...sameSlotBuys.map((b) => ({ ...b, _slot: slot })),
-    ...nextSlotBuys.map((b) => ({ ...b, _slot: slot + 1 })),
+    ...sameSlotBuys.map((b) => ({ ...b, _slot: slotNum })),
+    ...nextSlotBuys.map((b) => ({ ...b, _slot: slotNum + 1 })),
   ];
   const sigs = allRawBuys.map((b) => b.signature);
   let enhancedMap = new Map<string, NonNullable<ReturnType<typeof parseHeliusTx>>>();
@@ -124,7 +125,7 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
     return {
       buy: e ?? b,
       slot: b._slot,
-      slotOffset: b._slot === slot ? 0 : 1,
+      slotOffset: b._slot === slotNum ? 0 : 1,
       offsetMs: targetBlockTime ? (b.blockTime - targetBlockTime) * 1000 : 0,
       enrichedBuy: e ?? b,
     };

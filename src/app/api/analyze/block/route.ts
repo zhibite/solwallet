@@ -8,13 +8,14 @@ import { analyzeBlock, saveBlockAnalysis } from '@/lib/first-sniper';
 
 export async function POST(req: NextRequest) {
   const { slot, mint, targetSig } = await req.json();
-  if (!slot || !mint) {
+  const slotN = Number(slot);
+  if (!slotN || !mint) {
     return NextResponse.json({ ok: false, error: 'slot/mint 必填' }, { status: 400 });
   }
   try {
-    const result = await analyzeBlock(slot, mint, targetSig);
+    const result = await analyzeBlock(slotN, mint, targetSig);
     const blockTime = new Date().toISOString();
-    const analysisId = await saveBlockAnalysis(slot, mint, targetSig || '', blockTime, result);
+    const analysisId = await saveBlockAnalysis(slotN, mint, targetSig || '', blockTime, result);
     return NextResponse.json({
       ok: true,
       analysisId,
