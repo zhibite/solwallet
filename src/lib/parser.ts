@@ -120,7 +120,18 @@ export function calcPriorityFee(tx: HeliusEnhancedTx): number {
   // priorityFee = cuPrice * cuLimit / 1e6 (cuPrice 是 microlamports)
   // 但实际上很多交易只设置 cuPrice，cuLimit 走默认 200000
   const cu = cuLimit || 200_000;
-  return Math.floor((cuPrice * cu) / 1_000_000); // lamports
+  const parsed = Math.floor((cuPrice * cu) / 1_000_000); // lamports
+
+  // 兜底：用 tx.fee 反推 priority fee。
+  // Solana 每笔签名收 5000 lamports base fee，因此 priorityFee ≈ fee − 5000 × sigCount。
+  // 单签 sniper tx 几乎全是 1 个签名；多签需 signatures 数组，但当前 HeliusEnhancedTx 只暴露主 signature。
+  // 这样做的好处：能覆盖 (a) 老 ComputeBudget 顶层指令、(b) 新 pfeeUxB6 / Blockworks PriorityFee
+  // 走 CPI innerInstruction 发的 priority fee、(c) 完全不付 prio（此时 fallback=0）。
+  const baseFee = 5000; // 单签 base fee
+  const fallback = Math.max(0, (tx.fee ?? 0) - baseFee);
+
+  // 取较大值，避免在多签场景下 fallback 偏低
+  return Math.max(parsed, fallback);
 }
 
 /** 是否为 bundled transaction（含 Address Lookup Table） */
