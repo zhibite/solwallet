@@ -35,7 +35,18 @@ export async function POST(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const id = searchParams.get('id');
-  if (!id) return NextResponse.json({ ok: false, error: 'id 必填' }, { status: 400 });
-  const n = await execute('DELETE FROM own_wallets WHERE id = $1', [id]);
-  return NextResponse.json({ ok: true, deleted: n });
+  const address = searchParams.get('address');
+  try {
+    let n = 0;
+    if (id) {
+      n = await execute('DELETE FROM own_wallets WHERE id = $1', [id]);
+    } else if (address) {
+      n = await execute('DELETE FROM own_wallets WHERE address = $1', [address]);
+    } else {
+      return NextResponse.json({ ok: false, error: 'id 或 address 必填' }, { status: 400 });
+    }
+    return NextResponse.json({ ok: true, deleted: n });
+  } catch (err: any) {
+    return NextResponse.json({ ok: false, error: err.message }, { status: 500 });
+  }
 }

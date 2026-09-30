@@ -1,5 +1,6 @@
 "use client";
 import React, { useState, useEffect, useCallback } from "react";
+import AddressCopy from "@/components/common/AddressCopy";
 import AddTargetForm from "./AddTargetForm";
 import TargetRow from "./TargetRow";
 
@@ -21,6 +22,12 @@ interface Stats {
   analyzed: number;
 }
 
+interface OwnWallet {
+  id: number;
+  address: string;
+  label: string | null;
+}
+
 export default function MonitorList() {
   const [targets, setTargets] = useState<Target[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
@@ -28,15 +35,24 @@ export default function MonitorList() {
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'paused'>('all');
   const [busy, setBusy] = useState<null | 'cleanup' | 'clearAll'>(null);
 
+  // 我的钱包
+  const [ownWallets, setOwnWallets] = useState<OwnWallet[]>([]);
+  const [walletAddr, setWalletAddr] = useState('');
+  const [walletLabel, setWalletLabel] = useState('');
+  const [walletBusy, setWalletBusy] = useState(false);
+  const [walletError, setWalletError] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [tRes, sRes] = await Promise.all([
+      const [tRes, sRes, wRes] = await Promise.all([
         fetch('/api/targets').then((r) => r.json()),
         fetch('/api/stats').then((r) => r.json()),
+        fetch('/api/wallets').then((r) => r.json()),
       ]);
       if (tRes.ok) setTargets(tRes.data);
       if (sRes.ok) setStats(sRes.data);
+      if (wRes.ok) setOwnWallets(wRes.data);
     } finally {
       setLoading(false);
     }
@@ -47,6 +63,37 @@ export default function MonitorList() {
     const t = setInterval(load, 15_000);
     return () => clearInterval(t);
   }, [load]);
+
+  const addWallet = async () => {
+    setWalletError(null);
+    if (!walletAddr || walletAddr.length < 32 || walletAddr.length > 44) {
+      setWalletError('请输入合法的 Solana 地址 (32-44 字符)');
+      return;
+    }
+    setWalletBusy(true);
+    try {
+      const res = await fetch('/api/wallets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address: walletAddr, label: walletLabel || undefined }),
+      });
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error);
+      setWalletAddr('');
+      setWalletLabel('');
+      await load();
+    } catch (err: any) {
+      setWalletError(err.message || '添加失败');
+    } finally {
+      setWalletBusy(false);
+    }
+  };
+
+  const removeWallet = async (id: number) => {
+    if (!confirm('删除此跟单钱包？')) return;
+    await fetch(`/api/wallets?id=${id}`, { method: 'DELETE' });
+    await load();
+  };
 
   const handleAdd = async (data: { address: string; label?: string; threshold_sol: number }) => {
     const res = await fetch('/api/targets', {
@@ -111,6 +158,65 @@ export default function MonitorList() {
         <StatCard label="已记录 buy" value={stats?.recordedBuys ?? '-'} />
         <StatCard label="待分析" value={stats?.pending ?? '-'} />
         <StatCard label="已分析" value={stats?.analyzed ?? '-'} />
+      </div>
+
+      {/* 我的钱包 */}
+      <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-sm font-semibold text-gray-800 dark:text-white/90">我的钱包</h2>
+          <span className="text-xs text-gray-500 dark:text-gray-400">我自己跟单的地址（用来算我在抢单里的排位）</span>
+        </div>
+        <div className="flex flex-wrap gap-2 items-end">
+          <div className="flex-1 min-w-[280px]">
+            <input
+              type="text"
+              value={walletAddr}
+              onChange={(e) => setWalletAddr(e.target.value.trim())}
+              placeholder="Solana 地址..."
+              className="w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-zinc-700 text-sm font-mono text-gray-800 dark:text-white/90 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div className="w-32">
+            <input
+              type="text"
+              value={walletLabel}
+              onChange={(e) => setWalletLabel(e.target.value)}
+              placeholder="备注"
+              className="w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-zinc-700 text-sm text-gray-800 dark:text-white/90 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <button
+            onClick={addWallet}
+            disabled={walletBusy}
+            className="h-10 px-4 rounded-xl bg-brand-500 hover:bg-brand-600 disabled:opacity-50 text-white text-sm font-medium flex items-center gap-1"
+          >
+            <span>+</span>
+            {walletBusy ? '添加中...' : '添加'}
+          </button>
+        </div>
+        {walletError && <p className="mt-2 text-xs text-error-500">{walletError}</p>}
+        {ownWallets.length > 0 ? (
+          <div className="flex flex-wrap gap-2 mt-3">
+            {ownWallets.map((w) => (
+              <div
+                key={w.id}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-warning-50 dark:bg-warning-500/10 border border-warning-200 dark:border-warning-500/30"
+              >
+                <AddressCopy address={w.address} length={6} />
+                {w.label && <span className="text-xs text-gray-500 dark:text-gray-400">({w.label})</span>}
+                <button
+                  onClick={() => removeWallet(w.id)}
+                  className="text-xs text-gray-400 hover:text-error-500 ml-1"
+                  title="删除此钱包"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="mt-3 text-xs text-gray-400">尚未添加任何钱包</p>
+        )}
       </div>
 
       {/* 添加目标 + 全局操作 */}

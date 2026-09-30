@@ -46,9 +46,26 @@ export async function GET(req: NextRequest) {
   params.push(limit);
 
   const sql = `
-    SELECT t.*, mt.label AS target_label
+    SELECT t.*,
+           mt.label AS target_label,
+           b_first.slot AS first_sniper_slot,
+           b_first.signature AS first_sniper_buyer_signature,
+           b_own.block_index AS my_block_index,
+           b_own.tip_sol::text AS my_tip_sol,
+           b_own.prio_lamports AS my_prio_lamports,
+           b_own.signature AS my_signature,
+           b_own.result AS my_result
     FROM target_trades t
     LEFT JOIN monitored_targets mt ON mt.id = t.target_id
+    LEFT JOIN block_buyers b_first ON b_first.signature = t.first_sniper_signature
+    LEFT JOIN LATERAL (
+      SELECT bb.*
+      FROM block_buyers bb
+      JOIN block_analyses ba ON ba.id = bb.block_analysis_id
+      WHERE bb.slot = t.slot AND ba.mint = t.mint AND bb.is_own = true
+      ORDER BY bb.block_index ASC
+      LIMIT 1
+    ) b_own ON true
     ${where}
     ORDER BY t.block_time DESC
     LIMIT $${params.length}

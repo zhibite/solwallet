@@ -35,6 +35,14 @@ interface Trade {
   first_sniper_offset_pos: number | null;
   pnl_sol: string | null;
   status: string;
+  // 子表附加列（来自 transactions API JOIN block_buyers）
+  first_sniper_slot?: number | null;       // 狙击者所在 slot
+  first_sniper_buyer_signature?: string | null; // 狙击者在 block_buyers 里的 sig
+  my_block_index?: number | null;          // 我自己的块内序（从 0 开始，null = 没买）
+  my_tip_sol?: string | null;              // 我自己的 tip
+  my_prio_lamports?: number | null;        // 我自己的 prio
+  my_signature?: string | null;            // 我自己的 tx sig
+  my_result?: string | null;               // 我自己的 result
 }
 
 interface Props {
@@ -206,12 +214,22 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                       <th className="py-2 px-2 text-left">第一个狙击者</th>
                       <th className="py-2 px-2 text-right">狙击 TIP</th>
                       <th className="py-2 px-2 text-right">狙击 PRIO</th>
+                      <th className="py-2 px-2 text-right">跟单 SLOT</th>
+                      <th className="py-2 px-2 text-center">买家</th>
+                      <th className="py-2 px-2 text-center">我的排位</th>
+                      <th className="py-2 px-2 text-right">我的 TIP</th>
+                      <th className="py-2 px-2 text-right">我的 PRIO</th>
                       <th className="py-2 px-2 text-right">跟单收益</th>
                       <th className="py-2 px-2 text-center">详情</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {trades.map((t) => (
+                    {trades.map((t) => {
+                      const myPos = t.my_block_index !== null && t.my_block_index !== undefined
+                        ? `第${t.my_block_index + 1}个`
+                        : null;
+                      const firstSniperSig = t.first_sniper_buyer_signature || t.first_sniper_signature;
+                      return (
                       <tr key={t.id} className="border-b border-gray-100 dark:border-gray-700/50 hover:bg-white dark:hover:bg-zinc-700">
                         <td className="py-1.5 px-2"><RelativeTime iso={t.block_time} /></td>
                         <td className="py-1.5 px-2"><AddressCopy address={t.mint} length={4} /></td>
@@ -233,6 +251,35 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                         </td>
                         <td className="py-1.5 px-2 text-right"><SolAmount value={t.first_sniper_tip_sol} /></td>
                         <td className="py-1.5 px-2 text-right font-mono">{t.first_sniper_prio_lamports || 0}</td>
+                        <td className="py-1.5 px-2 text-right font-mono text-gray-500 dark:text-gray-400">
+                          {t.first_sniper_slot ?? '-'}
+                        </td>
+                        <td className="py-1.5 px-2 text-center">
+                          {firstSniperSig ? (
+                            <a
+                              href={`https://solscan.io/tx/${firstSniperSig}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-brand-500 hover:underline text-xs"
+                              title="狙击者交易"
+                            >
+                              →
+                            </a>
+                          ) : <span className="text-gray-300">-</span>}
+                        </td>
+                        <td className="py-1.5 px-2 text-center">
+                          {myPos ? (
+                            <span className="font-mono text-xs text-warning-600 dark:text-warning-400" title={t.my_result ? `结果: ${t.my_result}` : ''}>
+                              {myPos}
+                            </span>
+                          ) : <span className="text-gray-300">-</span>}
+                        </td>
+                        <td className="py-1.5 px-2 text-right">
+                          {t.my_tip_sol !== null && t.my_tip_sol !== undefined ? <SolAmount value={t.my_tip_sol} /> : <span className="text-gray-300">-</span>}
+                        </td>
+                        <td className="py-1.5 px-2 text-right font-mono">
+                          {t.my_prio_lamports !== null && t.my_prio_lamports !== undefined ? t.my_prio_lamports : <span className="text-gray-300">-</span>}
+                        </td>
                         <td className="py-1.5 px-2 text-right"><SolAmount value={t.pnl_sol} signed /></td>
                         <td className="py-1.5 px-2 text-center">
                           <Link
@@ -243,7 +290,8 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                           </Link>
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
