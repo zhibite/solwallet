@@ -1,10 +1,16 @@
 "use client";
 import React, { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
 import AddressCopy from "@/components/common/AddressCopy";
 import SolAmount from "@/components/common/SolAmount";
 import PrioSolAmount from "@/components/common/PrioSolAmount";
 import RelativeTime from "@/components/common/RelativeTime";
+
+interface BlockDetailViewProps {
+  /** Slot 编号 */
+  slot: number;
+  /** Token mint */
+  mint: string;
+}
 
 interface Buyer {
   id: number;
@@ -38,8 +44,11 @@ interface Analysis {
   next_slot_count: number;
 }
 
-export default function BlockDetail() {
-  const params = useParams<{ slot: string; mint: string }>();
+/**
+ * 纯展示版：从 props 接收 slot + mint（路由层 / 监控页内联展开都用同一个）
+ * 不依赖 useParams，便于在任意父组件里内联调用。
+ */
+export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [buyers, setBuyers] = useState<Buyer[]>([]);
   const [loading, setLoading] = useState(true);
@@ -50,7 +59,7 @@ export default function BlockDetail() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/block/${params.slot}/${params.mint}`);
+      const res = await fetch(`/api/block/${slot}/${mint}`);
       const json = await res.json();
       if (!json.ok) {
         setError(json.error || '未找到该 block 分析');
@@ -58,12 +67,14 @@ export default function BlockDetail() {
       }
       setAnalysis(json.data.analysis);
       setBuyers(json.data.buyers);
+    } catch (err: any) {
+      setError(`网络错误: ${err?.message || String(err)}`);
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => { load(); }, [params.slot, params.mint]);
+  useEffect(() => { load(); }, [slot, mint]);
 
   const recalc = async () => {
     setRecalculating(true);
@@ -72,8 +83,8 @@ export default function BlockDetail() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          slot: parseInt(params.slot, 10),
-          mint: params.mint,
+          slot,
+          mint,
           targetSig: analysis?.target_signature,
         }),
       });
@@ -87,7 +98,7 @@ export default function BlockDetail() {
     await fetch('/api/wallets', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ address, label: `from block ${params.slot}` }),
+      body: JSON.stringify({ address, label: `from block ${slot}` }),
     });
     alert(`已加入跟单钱包: ${address.slice(0, 8)}...`);
     await load();
@@ -95,7 +106,7 @@ export default function BlockDetail() {
 
   /** 行级：算 / 重算 该 buyer 的 PnL */
   const calcBuyerPnL = async (buyerId: number) => {
-    const res = await fetch(`/api/block/${params.slot}/${params.mint}/buyer/${buyerId}/pnl`, {
+    const res = await fetch(`/api/block/${slot}/${mint}/buyer/${buyerId}/pnl`, {
       method: 'POST',
     });
     const json = await res.json();
@@ -111,7 +122,7 @@ export default function BlockDetail() {
 
   /** 行级：取消算（清空 pnl_sol） */
   const clearBuyerPnL = async (buyerId: number) => {
-    const res = await fetch(`/api/block/${params.slot}/${params.mint}/buyer/${buyerId}/pnl`, {
+    const res = await fetch(`/api/block/${slot}/${mint}/buyer/${buyerId}/pnl`, {
       method: 'DELETE',
     });
     if (res.ok) {
@@ -131,8 +142,8 @@ export default function BlockDetail() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          slot: parseInt(params.slot, 10),
-          mint: params.mint,
+          slot,
+          mint,
           targetSig: sig,
         }),
       });

@@ -14,6 +14,8 @@ import { query, queryOne, withTransaction } from './db';
 import { getHelius, isHeliusConfigured } from './helius';
 import { parseHeliusTx } from './parser';
 import { saveBlockAnalysis } from './first-sniper';
+import { quickAkbotCheck } from './akbot';
+import { markAsAkbot } from './pool';
 
 const POLL_INTERVAL_MS = parseInt(process.env.MONITOR_POLL_INTERVAL_MS || '5000', 10);
 const WEBHOOK_URL = process.env.WEBHOOK_URL || '';
@@ -196,10 +198,65 @@ export async function ingestTargetTrade(targetId: number, buy: any, rawTx: any) 
       } catch (poolErr) {
         console.warn('[monitor] pool scan failed', poolErr);
       }
+
+      // 4) 实时 AkBot 检测：对这次 block 的所有非 own / 非 target 买家，
+      //    各跑一次 quickAkbotCheck（最近 200 签名），命中即异步标记。
+      //    顺序执行 + 150ms throttle 防止 Helius 速率限制；
+      //    再套一层 setImmediate 做到真正 fire-and-forget —— 不阻塞下一次 analyzeBlock/pool scan。
+      //    （webhook 突发时，analyzeBlock 不会因 akbot 排队而堆积。）
+      setImmediate(() => {
+        scheduleAkbotChecksForBuyers(analyzeResult.buyers).catch((e) =>
+          console.warn('[monitor] akbot check failed:', (e as Error).message),
+        );
+      });
     } catch (err) {
       console.error('[monitor] analyzeBlock failed', err);
     }
   });
+}
+
+/**
+ * 对一批买家跑轻量 AkBot 检测
+ * - 跳过 mark === 'target' / 'own'
+ * - 同地址只跑一次
+ * - 命中后立即 markAsAkbot（幂等）
+ * - 顺序执行 + 150ms throttle（Helius free ~10 RPS，paid ~50 RPS）
+ *
+ * 每个 event 5-20 个新买家 → 顺序执行 ≈ 1-3s。
+ * 故意做成在 setImmediate 里调用，避免阻塞 monitor 主流程（analyzeBlock / pool scan / 下一次事件）。
+ * 若想彻底解耦，可以把这一段提到独立 worker / BullMQ 队列。
+ */
+export async function scheduleAkbotChecksForBuyers(
+  buyers: Array<{ address: string; mark?: string }>,
+): Promise<void> {
+  if (!Array.isArray(buyers) || buyers.length === 0) return;
+  const seen = new Set<string>();
+  const targets: string[] = [];
+  for (const b of buyers) {
+    if (!b?.address) continue;
+    if (b.mark === 'target' || b.mark === 'own') continue;
+    if (seen.has(b.address)) continue;
+    seen.add(b.address);
+    targets.push(b.address);
+  }
+  if (targets.length === 0) return;
+
+  const SLEEP_MS = 150;
+  for (const addr of targets) {
+    try {
+      const ev = await quickAkbotCheck(addr);
+      if (ev) {
+        await markAsAkbot(addr, ev.signature, ev.blockTime, ev.slot);
+        console.log(
+          `[monitor] akbot detected ${addr.slice(0, 8)}…${addr.slice(-4)} evidence=${ev.signature.slice(0, 12)}…`,
+        );
+      }
+    } catch (err) {
+      // 单个地址失败不影响其它
+      console.warn(`[monitor] quickAkbotCheck ${addr.slice(0, 8)}… failed: ${(err as Error).message}`);
+    }
+    if (SLEEP_MS > 0) await new Promise((r) => setTimeout(r, SLEEP_MS));
+  }
 }
 
 /** 同步 Helius Webhook（handler 调用） */

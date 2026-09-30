@@ -46,6 +46,41 @@ export interface PoolMember {
   promoted_to_target: boolean;
   promoted_at: string | null;
   notes: string | null;
+  // AKBot 用户标记（见 migrations/0006_akbot_tag.sql）
+  is_akbot: boolean;
+  akbot_detected_at: string | null;
+  akbot_evidence_sig: string | null;
+  akbot_evidence_slot: number | null;
+}
+
+/**
+ * 把一个池子成员标记为 AKBot 用户。幂等：已经是 true 就不动 evidence。
+ * - 证据签名/时间以「最早」写入的那笔为准，避免后到的覆盖前面的
+ * - 注意只写 UPDATE，不做 SELECT，调用方拿不到影响的行数
+ */
+export async function markAsAkbot(
+  address: string,
+  evidenceSig: string,
+  blockTime: number | null | undefined,
+  slot: number | null | undefined,
+): Promise<void> {
+  // evidence sig 必须是字符串（且非空）
+  if (!address || !evidenceSig) return;
+  const detectedAt =
+    typeof blockTime === 'number' && blockTime > 0
+      ? new Date(blockTime * 1000).toISOString()
+      : new Date().toISOString();
+  const slotValue = typeof slot === 'number' ? slot : null;
+  await query(
+    `UPDATE pool_members
+        SET is_akbot = TRUE,
+            akbot_detected_at = COALESCE(akbot_detected_at, $2::timestamptz),
+            akbot_evidence_sig = COALESCE(akbot_evidence_sig, $3),
+            akbot_evidence_slot = COALESCE(akbot_evidence_slot, $4)
+      WHERE address = $1
+        AND is_akbot = FALSE`,
+    [address, detectedAt, evidenceSig, slotValue],
+  );
 }
 
 export interface PoolEdge {
@@ -437,6 +472,7 @@ export async function listPoolMembers(opts: {
   role?: string;
   promoted?: boolean;
   minFreq?: number;
+  isAkbot?: boolean;
   limit?: number;
   offset?: number;
   sortBy?: 'freq' | 'score' | 'seen';
@@ -455,6 +491,10 @@ export async function listPoolMembers(opts: {
     params.push(opts.minFreq);
     conditions.push(`freq >= $${params.length}`);
   }
+  if (opts.isAkbot !== undefined) {
+    params.push(opts.isAkbot);
+    conditions.push(`is_akbot = $${params.length}`);
+  }
   const orderCol =
     opts.sortBy === 'score' ? 'worth_score DESC NULLS LAST' :
     opts.sortBy === 'seen' ? 'last_seen_at DESC' :
@@ -470,7 +510,8 @@ export async function listPoolMembers(opts: {
            worth_score::text AS worth_score,
            recommended_tip_sol::text AS recommended_tip_sol,
            recommended_prio_lamports,
-           score_updated_at, promoted_to_target, promoted_at, notes
+           score_updated_at, promoted_to_target, promoted_at, notes,
+           is_akbot, akbot_detected_at, akbot_evidence_sig, akbot_evidence_slot
     FROM pool_members
     WHERE ${conditions.join(' AND ')}
     ORDER BY ${orderCol}
@@ -491,7 +532,8 @@ export async function getPoolMember(address: string): Promise<PoolMember | null>
            worth_score::text AS worth_score,
            recommended_tip_sol::text AS recommended_tip_sol,
            recommended_prio_lamports,
-           score_updated_at, promoted_to_target, promoted_at, notes
+           score_updated_at, promoted_to_target, promoted_at, notes,
+           is_akbot, akbot_detected_at, akbot_evidence_sig, akbot_evidence_slot
     FROM pool_members WHERE address = $1
   `, [address]);
   return row ? normalizeMember(row) : null;
@@ -558,14 +600,16 @@ export async function getPoolStats(): Promise<{
   firstSnipers: number;
   followers: number;
   totalEdges: number;
+  akbotCount: number;
   bfsLastRun: string | null;
 }> {
-  const [total, prom, fs, fo, ed, lastRun] = await Promise.all([
+  const [total, prom, fs, fo, ed, akb, lastRun] = await Promise.all([
     queryOne<{ c: string }>(`SELECT COUNT(*)::text AS c FROM pool_members`),
     queryOne<{ c: string }>(`SELECT COUNT(*)::text AS c FROM pool_members WHERE promoted_to_target = true`),
     queryOne<{ c: string }>(`SELECT COUNT(*)::text AS c FROM pool_members WHERE role IN ('first_sniper', 'both')`),
     queryOne<{ c: string }>(`SELECT COUNT(*)::text AS c FROM pool_members WHERE role IN ('follower', 'both')`),
     queryOne<{ c: string }>(`SELECT COUNT(*)::text AS c FROM pool_edges`),
+    queryOne<{ c: string }>(`SELECT COUNT(*)::text AS c FROM pool_members WHERE is_akbot = true`),
     queryOne<{ finished_at: string }>(`SELECT finished_at FROM pool_discoveries ORDER BY started_at DESC LIMIT 1`),
   ]);
   return {
@@ -574,6 +618,7 @@ export async function getPoolStats(): Promise<{
     firstSnipers: parseInt(fs?.c ?? '0', 10),
     followers: parseInt(fo?.c ?? '0', 10),
     totalEdges: parseInt(ed?.c ?? '0', 10),
+    akbotCount: parseInt(akb?.c ?? '0', 10),
     bfsLastRun: lastRun?.finished_at ?? null,
   };
 }
@@ -584,5 +629,7 @@ function normalizeMember(r: any): PoolMember {
     avg_buy_sol: r.avg_buy_sol ? parseFloat(r.avg_buy_sol) : 0,
     worth_score: r.worth_score !== null ? parseFloat(r.worth_score) : null,
     recommended_tip_sol: r.recommended_tip_sol !== null ? parseFloat(r.recommended_tip_sol) : null,
+    is_akbot: !!r.is_akbot,
+    akbot_evidence_slot: r.akbot_evidence_slot !== null ? Number(r.akbot_evidence_slot) : null,
   };
 }

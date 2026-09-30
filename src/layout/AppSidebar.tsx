@@ -54,6 +54,11 @@ const navItems: NavItem[] = [
     path: "/library",
   },
   {
+    icon: <ShootingStarIcon />,
+    name: "狙击排行",
+    path: "/sniper",
+  },
+  {
     icon: <GroupIcon />,
     name: "组合排行",
     path: "/groups",

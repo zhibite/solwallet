@@ -63,7 +63,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { address, label, threshold_sol = 0.5 } = body || {};
+    const { address, label, threshold_sol = 1 } = body || {};
     if (!address || typeof address !== 'string' || address.length < 32 || address.length > 44) {
       return NextResponse.json({ ok: false, error: 'address 不合法' }, { status: 400 });
     }

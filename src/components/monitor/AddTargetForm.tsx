@@ -9,7 +9,7 @@ interface Props {
 export default function AddTargetForm({ onAdd }: Props) {
   const [address, setAddress] = useState("");
   const [label, setLabel] = useState("");
-  const [threshold, setThreshold] = useState("0.5");
+  const [threshold, setThreshold] = useState("1");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -22,7 +22,7 @@ export default function AddTargetForm({ onAdd }: Props) {
     }
     setLoading(true);
     try {
-      await onAdd({ address, label: label || undefined, threshold_sol: parseFloat(threshold) || 0.5 });
+      await onAdd({ address, label: label || undefined, threshold_sol: parseFloat(threshold) || 1 });
       setAddress("");
       setLabel("");
     } catch (err: any) {
@@ -36,7 +36,7 @@ export default function AddTargetForm({ onAdd }: Props) {
     <form onSubmit={submit} className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 p-4">
       <div className="flex flex-wrap gap-3 items-end">
         <div className="flex-1 min-w-[280px]">
-          <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">监控目标地址</label>
+          <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">监控目标地址（要高点的钱包）</label>
           <input
             type="text"
             value={address}

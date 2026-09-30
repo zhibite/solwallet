@@ -24,6 +24,10 @@ interface PoolMember {
   recommended_prio_lamports: number | null;
   promoted_to_target: boolean;
   promoted_at: string | null;
+  is_akbot: boolean;
+  akbot_detected_at: string | null;
+  akbot_evidence_sig: string | null;
+  akbot_evidence_slot: number | null;
 }
 
 interface PoolEdge {
@@ -167,6 +171,14 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
             {member.promoted_to_target && (
               <span className="text-xs text-success-500">已晋升监控</span>
             )}
+            {member.is_akbot && (
+              <span
+                className="inline-flex items-center px-2 py-0.5 rounded text-xs bg-orange-100 dark:bg-orange-500/15 text-orange-700 dark:text-orange-400 border border-orange-200 dark:border-orange-500/30"
+                title={`检测时间: ${member.akbot_detected_at ?? ''}\n证据签名: ${member.akbot_evidence_sig ?? ''}`}
+              >
+                🤖 AkBot 用户
+              </span>
+            )}
           </div>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
             出现 {member.freq} 次 · 跟随 {member.distinct_targets} 个独立目标
@@ -183,6 +195,40 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
           )}
         </div>
       </div>
+
+      {/* AkBot 检测详情（命中时显示，方便人工 Solscan 复核） */}
+      {member.is_akbot && (
+        <div className="bg-orange-50 dark:bg-orange-500/10 border border-orange-200 dark:border-orange-500/30 rounded-xl p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-base">🤖</span>
+            <h3 className="text-sm font-semibold text-orange-700 dark:text-orange-400">AkBot 用户（卖币通过统一合约）</h3>
+          </div>
+          <div className="text-xs text-gray-700 dark:text-gray-300 space-y-1">
+            <div>
+              <span className="text-gray-500">检测时间：</span>
+              <span className="font-mono">{member.akbot_detected_at ? new Date(member.akbot_detected_at).toLocaleString('zh-CN', { hour12: false }) : '-'}</span>
+            </div>
+            <div>
+              <span className="text-gray-500">证据 tx：</span>
+              <a
+                href={`https://solscan.io/tx/${member.akbot_evidence_sig ?? ''}`}
+                target="_blank"
+                rel="noreferrer"
+                className="font-mono text-orange-700 dark:text-orange-400 hover:underline"
+              >
+                {member.akbot_evidence_sig ?? '-'}
+              </a>
+              {member.akbot_evidence_slot != null && (
+                <span className="text-gray-400 ml-2">slot {member.akbot_evidence_slot}</span>
+              )}
+            </div>
+            <div className="text-gray-500 pt-1">
+              所有 AkBot 用户都用同一合约 (AKbotMAGJmYPwV8z55Lqiqgijt2KcjLeFGue5sw1noHM) 卖币 ——
+              在 Solscan 点上面这笔 tx 看 Inner Instructions 即可复核。
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Summary cards */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
@@ -337,7 +383,7 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
                     <th className="py-2 px-2 text-center">输</th>
                     <th className="py-2 px-2 text-center">胜率</th>
                     <th className="py-2 px-2 text-right">均 TIP</th>
-                    <th className="py-2 px-2 text-right">均 PRIO (SOL)</th>
+                    <th className="py-2 px-2 text-right">均 PRIO</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -377,7 +423,7 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
                       <th className="py-2 px-2 text-center">成功</th>
                       <th className="py-2 px-2 text-center">失败</th>
                       <th className="py-2 px-2 text-right">最高 TIP</th>
-                      <th className="py-2 px-2 text-right">最高 PRIO (SOL)</th>
+                      <th className="py-2 px-2 text-right">最高 PRIO</th>
                     </tr>
                   </thead>
                   <tbody>

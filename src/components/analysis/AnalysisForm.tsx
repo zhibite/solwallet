@@ -106,6 +106,20 @@ export default function AnalysisForm() {
     return address.slice(0, 4) + '...' + address.slice(-4);
   }, [result, address]);
 
+  // 衍生指标：胜率 / 包赚钱率 / 最大单笔盈亏
+  const extraStats = useMemo(() => {
+    if (!result) return null;
+    const trades = result.trades;
+    const wins = trades.filter((t) => t.pnl > 0).length;
+    const losses = trades.filter((t) => t.pnl < 0).length;
+    const settled = wins + losses; // 已结案（不含 pending）
+    const winRate = settled > 0 ? (wins / settled) * 100 : 0;
+    const coverageRate = result.buyCount > 0 ? (wins / result.buyCount) * 100 : 0;
+    const maxWin = trades.reduce((m, t) => (t.pnl > m ? t.pnl : m), 0);
+    const maxLoss = trades.reduce((m, t) => (t.pnl < m ? t.pnl : m), 0);
+    return { winRate, coverageRate, maxWin, maxLoss };
+  }, [result]);
+
   const filteredTrades = useMemo(() => {
     return result?.trades.filter((t) => {
       if (filter === 'all') return true;
@@ -175,16 +189,58 @@ export default function AnalysisForm() {
       {/* 结果 */}
       {result && (
         <>
-          {/* 统计卡片 */}
+          {/* 统计卡片 - 第一行：核心数据 */}
           <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
-            <StatCard label="总 PnL (SOL)" value={<SolAmount value={result.totalPnl} signed />} highlight />
-            <StatCard label="失败手续费 (SOL)" value={<SolAmount value={result.failedFee} />} />
-            <StatCard label="净 PnL (SOL)" value={<SolAmount value={result.netPnl} signed />} highlight />
+            <StatCard label="总 PnL (SOL)" value={<SolAmount value={result.totalPnl} signed />} tone="brand" />
+            <StatCard label="失败手续费 (SOL)" value={<SolAmount value={result.failedFee} />} tone="danger" />
+            <StatCard
+              label="净 PnL (SOL)"
+              value={<SolAmount value={result.netPnl} signed />}
+              tone={result.netPnl >= 0 ? 'success' : 'danger'}
+            />
             <StatCard label="Buy 数量" value={result.buyCount} />
-            <StatCard label="失败" value={result.failed} />
-            <StatCard label="已确认" value={result.confirmed} />
-            <StatCard label="未确认" value={result.pending} />
+            <StatCard
+              label="失败"
+              value={<span className={result.failed > 0 ? 'text-error-500' : undefined}>{result.failed}</span>}
+              tone={result.failed > 0 ? 'danger' : 'default'}
+            />
+            <StatCard
+              label="已确认"
+              value={<span className="text-success-500">{result.confirmed}</span>}
+              tone={result.confirmed > 0 ? 'success' : 'default'}
+            />
+            <StatCard
+              label="未确认"
+              value={<span className={result.pending > 0 ? 'text-error-500' : undefined}>{result.pending}</span>}
+              tone={result.pending > 0 ? 'danger' : 'default'}
+            />
           </div>
+
+          {/* 统计卡片 - 第二行：衍生指标 */}
+          {extraStats && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <StatCard
+                label="胜率"
+                value={`${extraStats.winRate.toFixed(1)}%`}
+                tone={extraStats.winRate >= 60 ? 'success' : extraStats.winRate < 40 ? 'danger' : 'default'}
+              />
+              <StatCard
+                label="包赚钱率"
+                value={`${extraStats.coverageRate.toFixed(1)}%`}
+                tone={extraStats.coverageRate >= 60 ? 'success' : extraStats.coverageRate < 40 ? 'danger' : 'default'}
+              />
+              <StatCard
+                label="最大收益 (SOL)"
+                value={<SolAmount value={extraStats.maxWin} signed />}
+                tone={extraStats.maxWin > 0 ? 'success' : 'default'}
+              />
+              <StatCard
+                label="最大亏损 (SOL)"
+                value={<SolAmount value={extraStats.maxLoss} signed />}
+                tone={extraStats.maxLoss < 0 ? 'danger' : 'default'}
+              />
+            </div>
+          )}
 
           {/* 操作 */}
           <div className="flex gap-2">
@@ -331,13 +387,23 @@ export default function AnalysisForm() {
   );
 }
 
-function StatCard({ label, value, highlight = false }: { label: string; value: React.ReactNode; highlight?: boolean }) {
+function StatCard({
+  label,
+  value,
+  tone = 'default',
+}: {
+  label: string;
+  value: React.ReactNode;
+  tone?: 'default' | 'brand' | 'success' | 'danger';
+}) {
+  const toneClass = {
+    default: 'bg-white dark:bg-zinc-800 border-gray-200 dark:border-gray-700',
+    brand: 'bg-brand-50 dark:bg-brand-500/10 border-brand-200 dark:border-brand-500/30',
+    success: 'bg-success-50 dark:bg-success-500/10 border-success-200 dark:border-success-500/30',
+    danger: 'bg-error-50 dark:bg-error-500/10 border-error-200 dark:border-error-500/30',
+  }[tone];
   return (
-    <div className={`rounded-lg border p-3 shadow-sm ${
-      highlight
-        ? 'bg-brand-50 dark:bg-brand-500/10 border-brand-200 dark:border-brand-500/30'
-        : 'bg-white dark:bg-zinc-800 border-gray-200 dark:border-gray-700'
-    }`}>
+    <div className={`rounded-lg border p-3 shadow-sm ${toneClass}`}>
       <div className="text-xs text-gray-500 dark:text-gray-400">{label}</div>
       <div className="text-lg font-semibold mt-0.5 text-gray-800 dark:text-white/90">{value}</div>
     </div>

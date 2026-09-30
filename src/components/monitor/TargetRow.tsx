@@ -6,6 +6,7 @@ import PrioSolAmount from "@/components/common/PrioSolAmount";
 import RelativeTime from "@/components/common/RelativeTime";
 import { ChevronDownIcon, ChevronUpIcon } from "@/icons";
 import Link from "next/link";
+import BlockDetailView from "@/components/block/BlockDetailView";
 
 interface Target {
   id: number;
@@ -63,6 +64,10 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
   const [editingThreshold, setEditingThreshold] = useState(false);
   const [thresholdVal, setThresholdVal] = useState(target.threshold_sol);
 
+  // 首狙展开：内联显示该 trade 对应 slot+mint 的 block 级详情
+  const [sniperExpanded, setSniperExpanded] = useState(false);
+  const [sniperKey, setSniperKey] = useState<{ slot: number; mint: string } | null>(null);
+
   const loadTrades = async () => {
     if (trades !== null) return;
     setLoadingTrades(true);
@@ -82,6 +87,31 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
     setExpanded(!expanded);
   };
 
+  /**
+   * 点击「最近一次 第一个狙击者」单元格
+   * - 若 target 行未展开，先展开 + 加载 trades
+   * - 切换 sniper 面板的展开/收起
+   * - 展开时用 latest trade 的 (slot, mint) 加载 block 详情
+   */
+  const toggleSniperPanel = async () => {
+    const latest = trades?.[0];
+    if (!latest) {
+      // 没数据时不允许展开
+      return;
+    }
+    // 确保 target 行已展开
+    if (!expanded) {
+      setExpanded(true);
+      await loadTrades();
+    }
+    const willOpen = !sniperExpanded;
+    setSniperExpanded(willOpen);
+    if (willOpen) {
+      // 用新 key 触发 BlockDetailView 内部重新加载
+      setSniperKey({ slot: latest.slot, mint: latest.mint });
+    }
+  };
+
   const handleSaveThreshold = async () => {
     const n = parseFloat(thresholdVal);
     if (Number.isNaN(n) || n < 0) return;
@@ -92,14 +122,17 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
   // 第一个狙击者信息（从最近一笔 buy 拿）
   const latest = trades?.[0];
 
-  // 格式化"抱对 +X"展示
+  // 失败判定：找不到首狙、或首狙 offset 计算不出来（同 slot 没抢到、只在下一 slot 跟随）
+  const sniperFailed = !!latest && (!latest.first_sniper || latest.first_sniper_offset_pos === null);
+
+  // 格式化"TX +X"展示
   const renderOffset = (pos: number | null | undefined) => {
     if (pos === null || pos === undefined) return null;
     const sign = pos > 0 ? '+' : pos < 0 ? '' : '';
     const color = pos > 0 ? 'text-error-500' : pos < 0 ? 'text-success-600' : 'text-gray-500';
     return (
       <span className={`font-mono ${color}`}>
-        抱对 {sign}{pos}
+        TX {sign}{pos}
       </span>
     );
   };
@@ -160,8 +193,15 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
           <RelativeTime iso={target.last_buy_at} />
         </td>
         <td className="px-3 py-3">
-          {latest && latest.first_sniper ? (
-            <div className="text-xs space-y-0.5">
+          {latest && latest.first_sniper && !sniperFailed ? (
+            <button
+              type="button"
+              onClick={toggleSniperPanel}
+              className={`text-left text-xs space-y-0.5 rounded-md px-1 py-0.5 -mx-1 hover:bg-slate-100 dark:hover:bg-zinc-700/60 transition-colors ${
+                sniperExpanded ? 'bg-brand-50 dark:bg-brand-500/10' : ''
+              }`}
+              title="点击展开该 slot 的 block 级详情"
+            >
               <AddressCopy address={latest.first_sniper} />
               <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-gray-500 dark:text-gray-400">
                 {renderOffset(latest.first_sniper_offset_pos)}
@@ -171,8 +211,18 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                 <span className="font-mono">
                   prio <PrioSolAmount value={latest.first_sniper_prio_lamports} />
                 </span>
+                <span className={`text-[10px] ${sniperExpanded ? 'text-brand-500' : 'text-gray-400'}`}>
+                  {sniperExpanded ? '收起 ▴' : '块内序 ▾'}
+                </span>
               </div>
-            </div>
+            </button>
+          ) : sniperFailed ? (
+            <span
+              className="inline-flex items-center px-2 py-0.5 rounded text-xs bg-error-50 text-error-700 dark:bg-error-500/15 dark:text-error-400"
+              title="未在同 slot 抢到首狙（要么 sniper offset 算不出、要么只在下一 slot 跟随）"
+            >
+              失败
+            </span>
           ) : (
             <span className="text-xs text-gray-400">-</span>
           )}
@@ -214,16 +264,16 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                       <th className="py-2 px-2 text-left">SLOT</th>
                       <th className="py-2 px-2 text-right">买入 SOL</th>
                       <th className="py-2 px-2 text-right">自己 TIP</th>
-                      <th className="py-2 px-2 text-right">自己 PRIO (SOL)</th>
+                      <th className="py-2 px-2 text-right">自己 PRIO</th>
                       <th className="py-2 px-2 text-center">捆绑</th>
                       <th className="py-2 px-2 text-left">首狙</th>
                       <th className="py-2 px-2 text-right">狙击 TIP</th>
-                      <th className="py-2 px-2 text-right">狙击 PRIO (SOL)</th>
+                      <th className="py-2 px-2 text-right">狙击 PRIO</th>
                       <th className="py-2 px-2 text-right">跟单 SLOT</th>
                       <th className="py-2 px-2 text-center">买家</th>
                       <th className="py-2 px-2 text-center">我的排位</th>
                       <th className="py-2 px-2 text-right">我的 TIP</th>
-                      <th className="py-2 px-2 text-right">我的 PRIO (SOL)</th>
+                      <th className="py-2 px-2 text-right">我的 PRIO</th>
                       <th className="py-2 px-2 text-right">跟单收益</th>
                       <th className="py-2 px-2 text-center">详情</th>
                     </tr>
@@ -301,6 +351,26 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                 </table>
               </div>
             )}
+          </td>
+        </tr>
+      )}
+
+      {expanded && sniperExpanded && sniperKey && (
+        <tr>
+          <td colSpan={9} className="bg-gray-50 dark:bg-zinc-700/30 px-6 py-4 border-t border-gray-200 dark:border-gray-700">
+            <div className="flex items-center justify-between mb-3">
+              <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">
+                Slot {sniperKey.slot} · Mint {sniperKey.mint.slice(0, 6)}…{sniperKey.mint.slice(-4)} 的 block 级买家分布
+              </div>
+              <button
+                type="button"
+                onClick={() => setSniperExpanded(false)}
+                className="text-xs text-gray-500 dark:text-gray-400 hover:text-error-500"
+              >
+                收起 ▴
+              </button>
+            </div>
+            <BlockDetailView key={`${sniperKey.slot}-${sniperKey.mint}`} slot={sniperKey.slot} mint={sniperKey.mint} />
           </td>
         </tr>
       )}
