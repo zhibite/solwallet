@@ -175,7 +175,10 @@ export function parseBlockTxs(
       if (!sig) continue;
       const msg: any = transaction?.message;
       if (!msg) continue;
-      const accountKeys: any[] = msg.accountKeys ?? (typeof msg.getAccountKeys === 'function' ? msg.getAccountKeys() : []);
+      // VersionedMessage.getAccountKeys() 在 ALT 未解析时会抛异常（公共 RPC 常见情况），
+      // 改用 staticAccountKeys（v0 静态账户键，feePayer 必在其中），legacy 用 accountKeys，
+      // 这样不依赖 RPC 端的 ALT 解析也能拿到 feePayer。
+      const accountKeys: any[] = (msg.staticAccountKeys ?? msg.accountKeys ?? []) as any[];
       const feePayer = accountKeys[0]?.toBase58?.() ?? accountKeys[0];
       if (!feePayer) continue;
 
