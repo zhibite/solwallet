@@ -52,9 +52,10 @@ interface Props {
   onDelete: (id: number) => void;
   onClear: (id: number) => void;
   onThresholdChange: (id: number, val: number) => void;
+  decisionCell?: React.ReactNode;
 }
 
-export default function TargetRow({ target, onPause, onResume, onDelete, onClear, onThresholdChange }: Props) {
+export default function TargetRow({ target, onPause, onResume, onDelete, onClear, onThresholdChange, decisionCell }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [trades, setTrades] = useState<Trade[] | null>(null);
   const [loadingTrades, setLoadingTrades] = useState(false);
@@ -173,6 +174,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
             <span className="text-xs text-gray-400">-</span>
           )}
         </td>
+        <td className="px-3 py-3">{decisionCell}</td>
         <td className="px-3 py-3">
           <div className="flex items-center gap-1 text-xs">
             <button onClick={toggleExpand} className="text-gray-500 dark:text-gray-400 hover:text-brand-500">{expanded ? '收起' : '展开'}</button>
@@ -194,7 +196,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
 
       {expanded && (
         <tr>
-          <td colSpan={8} className="bg-gray-50 dark:bg-zinc-700/30 px-6 py-4">
+          <td colSpan={9} className="bg-gray-50 dark:bg-zinc-700/30 px-6 py-4">
             {loadingTrades ? (
               <div className="text-xs text-gray-500 dark:text-gray-400">加载中...</div>
             ) : !trades || trades.length === 0 ? (

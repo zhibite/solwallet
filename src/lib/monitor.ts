@@ -183,14 +183,25 @@ export async function ingestTargetTrade(targetId: number, buy: any, rawTx: any) 
           ],
         );
       }
+
+      // 3) 增量扫描池子（递归发现闭环）
+      try {
+        const { scanForTarget } = await import('./pool');
+        await scanForTarget({ targetAddress: buy.address });
+      } catch (poolErr) {
+        console.warn('[monitor] pool scan failed', poolErr);
+      }
     } catch (err) {
       console.error('[monitor] analyzeBlock failed', err);
     }
   });
 }
 
-/** 注册 Helius Webhook */
-async function registerWebhooks() {
+/** 同步 Helius Webhook（handler 调用） */
+export async function registerWebhooks() {
+  if (!WEBHOOK_URL) {
+    throw new Error('WEBHOOK_URL 未配置');
+  }
   const helius = getHelius();
   const targets = await query<{ address: string }>(
     "SELECT address FROM monitored_targets WHERE status = 'active'",

@@ -4,6 +4,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { execute } from '@/lib/db';
+import { syncWebhookAsync } from '@/lib/sync-webhook';
 
 export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
@@ -12,5 +13,7 @@ export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: strin
     [id],
   );
   if (n === 0) return NextResponse.json({ ok: false, error: 'not found' }, { status: 404 });
+  // 恢复后 status='active'，加回 Helius 监控列表
+  syncWebhookAsync();
   return NextResponse.json({ ok: true });
 }

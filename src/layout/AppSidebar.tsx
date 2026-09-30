@@ -14,6 +14,8 @@ import {
   ShootingStarIcon,
   PlugInIcon,
   GroupIcon,
+  NetworkIcon,
+  BrainIcon,
 } from "../icons/index";
 import SidebarWidget from "./SidebarWidget";
 
@@ -30,6 +32,11 @@ const navItems: NavItem[] = [
     icon: <ShootingStarIcon />,
     name: "跟单抢单监控",
     path: "/",
+  },
+  {
+    icon: <NetworkIcon />,
+    name: "跟单池子",
+    path: "/pool",
   },
   {
     icon: <PieChartIcon />,

@@ -21,5 +21,14 @@ export async function register() {
     } catch (err) {
       console.error('[instrumentation] monitor failed to start', err);
     }
+
+    // 池子 worker（自动归池 + 决策重算）
+    try {
+      const { startPoolWorker } = await import('./lib/pool-worker');
+      await startPoolWorker();
+      console.log('[instrumentation] pool worker started');
+    } catch (err) {
+      console.error('[instrumentation] pool worker failed to start', err);
+    }
   }
 }

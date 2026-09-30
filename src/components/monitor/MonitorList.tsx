@@ -13,6 +13,18 @@ interface Target {
   record_count: number;
   last_buy_at: string | null;
   updated_at: string;
+  decision?: {
+    worth_score: number;
+    win_rate: number;
+    avg_pnl_sol: number;
+    p50_tip_sol: number;
+    p50_prio_lamports: number;
+    p75_tip_sol: number;
+    p75_prio_lamports: number;
+    success_count: number;
+    failed_count: number;
+    sample_size: number;
+  };
 }
 
 interface Stats {
@@ -280,14 +292,15 @@ export default function MonitorList() {
                 <th className="px-3 py-2 text-left font-medium">最新 buy</th>
                 <th className="px-3 py-2 text-left font-medium">距现在</th>
                 <th className="px-3 py-2 text-left font-medium">最近一次 第一个狙击者</th>
+                <th className="px-3 py-2 text-left font-medium">决策 (推荐 tip+prio / 评分)</th>
                 <th className="px-3 py-2 text-left font-medium">操作</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={8} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">加载中...</td></tr>
+                <tr><td colSpan={9} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">加载中...</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={8} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">暂无监控目标</td></tr>
+                <tr><td colSpan={9} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">暂无监控目标</td></tr>
               ) : (
                 filtered.map((t) => (
                   <TargetRow
@@ -298,12 +311,41 @@ export default function MonitorList() {
                     onDelete={handleDelete}
                     onClear={handleClear}
                     onThresholdChange={handleThreshold}
+                    decisionCell={<DecisionCell d={t.decision} />}
                   />
                 ))
               )}
             </tbody>
           </table>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function DecisionCell({ d }: { d: Target['decision'] }) {
+  if (!d) return <span className="text-xs text-gray-400">-</span>;
+  const s = d.worth_score;
+  const color = s > 1 ? 'text-success-500' : s < -0.5 ? 'text-error-500' : 'text-warning-500';
+  const tipText = d.p75_tip_sol ? d.p75_tip_sol.toFixed(4) : '-';
+  const prioText = d.p75_prio_lamports ? d.p75_prio_lamports.toLocaleString() : '-';
+  return (
+    <div className="text-xs space-y-0.5">
+      <div className="font-mono">
+        <span className="text-gray-500">P75 tip </span>
+        <span>{tipText}</span>
+        <span className="text-gray-300 mx-1">+</span>
+        <span className="text-gray-500">prio </span>
+        <span>{prioText}</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <span className={`font-mono font-semibold ${color}`}>{s.toFixed(2)}</span>
+        <span className="text-gray-400">
+          胜率 {(d.win_rate * 100).toFixed(0)}%
+        </span>
+        {d.sample_size === 0 && (
+          <span className="text-xs text-gray-400">样本不足</span>
+        )}
       </div>
     </div>
   );
