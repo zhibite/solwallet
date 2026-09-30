@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from "react";
 import AddressCopy from "@/components/common/AddressCopy";
 import SolAmount from "@/components/common/SolAmount";
+import PrioSolAmount from "@/components/common/PrioSolAmount";
 import RelativeTime from "@/components/common/RelativeTime";
 import { ChevronDownIcon, ChevronUpIcon } from "@/icons";
 import Link from "next/link";
@@ -146,7 +147,9 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
           )}
         </td>
         <td className="px-3 py-3 text-center">
-          <span className="font-mono text-xs">{target.record_count}</span>
+          <span className="font-mono text-sm font-semibold text-brand-600 dark:text-brand-400">
+            {target.record_count}
+          </span>
         </td>
         <td className="px-3 py-3">
           <span className="text-xs font-mono text-gray-600 dark:text-gray-400">
@@ -166,7 +169,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                   tip <SolAmount value={latest.first_sniper_tip_sol} />
                 </span>
                 <span className="font-mono">
-                  prio {latest.first_sniper_prio_lamports || 0}
+                  prio <PrioSolAmount value={latest.first_sniper_prio_lamports} />
                 </span>
               </div>
             </div>
@@ -211,16 +214,16 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                       <th className="py-2 px-2 text-left">SLOT</th>
                       <th className="py-2 px-2 text-right">买入 SOL</th>
                       <th className="py-2 px-2 text-right">自己 TIP</th>
-                      <th className="py-2 px-2 text-right">自己 PRIO</th>
+                      <th className="py-2 px-2 text-right">自己 PRIO (SOL)</th>
                       <th className="py-2 px-2 text-center">捆绑</th>
-                      <th className="py-2 px-2 text-left">第一个狙击者</th>
+                      <th className="py-2 px-2 text-left">首狙</th>
                       <th className="py-2 px-2 text-right">狙击 TIP</th>
-                      <th className="py-2 px-2 text-right">狙击 PRIO</th>
+                      <th className="py-2 px-2 text-right">狙击 PRIO (SOL)</th>
                       <th className="py-2 px-2 text-right">跟单 SLOT</th>
                       <th className="py-2 px-2 text-center">买家</th>
                       <th className="py-2 px-2 text-center">我的排位</th>
                       <th className="py-2 px-2 text-right">我的 TIP</th>
-                      <th className="py-2 px-2 text-right">我的 PRIO</th>
+                      <th className="py-2 px-2 text-right">我的 PRIO (SOL)</th>
                       <th className="py-2 px-2 text-right">跟单收益</th>
                       <th className="py-2 px-2 text-center">详情</th>
                     </tr>
@@ -238,7 +241,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                         <td className="py-1.5 px-2 font-mono text-gray-500 dark:text-gray-400">{t.slot}</td>
                         <td className="py-1.5 px-2 text-right"><SolAmount value={t.buy_sol} /></td>
                         <td className="py-1.5 px-2 text-right"><SolAmount value={t.target_tip_sol} /></td>
-                        <td className="py-1.5 px-2 text-right font-mono">{t.target_prio_lamports || 0}</td>
+                        <td className="py-1.5 px-2 text-right"><PrioSolAmount value={t.target_prio_lamports} /></td>
                         <td className="py-1.5 px-2 text-center">
                           {t.is_bundled ? <span className="text-success-500">✓</span> : <span className="text-gray-300">-</span>}
                         </td>
@@ -252,7 +255,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                           ) : <span className="text-gray-400">-</span>}
                         </td>
                         <td className="py-1.5 px-2 text-right"><SolAmount value={t.first_sniper_tip_sol} /></td>
-                        <td className="py-1.5 px-2 text-right font-mono">{t.first_sniper_prio_lamports || 0}</td>
+                        <td className="py-1.5 px-2 text-right"><PrioSolAmount value={t.first_sniper_prio_lamports} /></td>
                         <td className="py-1.5 px-2 text-right font-mono text-gray-500 dark:text-gray-400">
                           {t.first_sniper_slot ?? '-'}
                         </td>
@@ -279,8 +282,8 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                         <td className="py-1.5 px-2 text-right">
                           {t.my_tip_sol !== null && t.my_tip_sol !== undefined ? <SolAmount value={t.my_tip_sol} /> : <span className="text-gray-300">-</span>}
                         </td>
-                        <td className="py-1.5 px-2 text-right font-mono">
-                          {t.my_prio_lamports !== null && t.my_prio_lamports !== undefined ? t.my_prio_lamports : <span className="text-gray-300">-</span>}
+                        <td className="py-1.5 px-2 text-right">
+                          {t.my_prio_lamports !== null && t.my_prio_lamports !== undefined ? <PrioSolAmount value={t.my_prio_lamports} /> : <span className="text-gray-300">-</span>}
                         </td>
                         <td className="py-1.5 px-2 text-right"><SolAmount value={t.pnl_sol} signed /></td>
                         <td className="py-1.5 px-2 text-center">

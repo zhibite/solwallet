@@ -1,6 +1,7 @@
 "use client";
 import React, { useState, useEffect, useCallback } from "react";
 import AddressCopy from "@/components/common/AddressCopy";
+import PrioSolAmount from "@/components/common/PrioSolAmount";
 import AddTargetForm from "./AddTargetForm";
 import TargetRow from "./TargetRow";
 
@@ -291,7 +292,7 @@ export default function MonitorList() {
                 <th className="px-3 py-2 text-center font-medium">记录数</th>
                 <th className="px-3 py-2 text-left font-medium">最新 buy</th>
                 <th className="px-3 py-2 text-left font-medium">距现在</th>
-                <th className="px-3 py-2 text-left font-medium">最近一次 第一个狙击者</th>
+                <th className="px-3 py-2 text-left font-medium">最近一次 首狙</th>
                 <th className="px-3 py-2 text-left font-medium">决策 (推荐 tip+prio / 评分)</th>
                 <th className="px-3 py-2 text-left font-medium">操作</th>
               </tr>
@@ -328,7 +329,6 @@ function DecisionCell({ d }: { d: Target['decision'] }) {
   const s = d.worth_score;
   const color = s > 1 ? 'text-success-500' : s < -0.5 ? 'text-error-500' : 'text-warning-500';
   const tipText = d.p75_tip_sol ? d.p75_tip_sol.toFixed(4) : '-';
-  const prioText = d.p75_prio_lamports ? d.p75_prio_lamports.toLocaleString() : '-';
   return (
     <div className="text-xs space-y-0.5">
       <div className="font-mono">
@@ -336,7 +336,7 @@ function DecisionCell({ d }: { d: Target['decision'] }) {
         <span>{tipText}</span>
         <span className="text-gray-300 mx-1">+</span>
         <span className="text-gray-500">prio </span>
-        <span>{prioText}</span>
+        <PrioSolAmount value={d.p75_prio_lamports} />
       </div>
       <div className="flex items-center gap-2">
         <span className={`font-mono font-semibold ${color}`}>{s.toFixed(2)}</span>

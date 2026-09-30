@@ -84,6 +84,8 @@ async function pollAllTargets() {
   for (const t of targets) {
     try {
       const sigs = await helius.getSignaturesForAddress(t.address, { limit: 20 });
+      let recordedCount = 0; // 本轮实际入 buy 的数量
+      let recordedBlockTime: number | null = null; // 最近一笔被记录的 buy 的 blockTime
       for (const s of sigs) {
         if (s.err) continue;
         // 已存在则跳过
@@ -102,12 +104,15 @@ async function pollAllTargets() {
 
         // 写库
         await ingestTargetTrade(t.id, buy, tx);
+        recordedCount++;
+        // 用被录入的那笔的 blockTime，没拿到就用签名列表的头条
+        recordedBlockTime = (buy.blockTime && buy.blockTime > 0) ? buy.blockTime : s.blockTime;
       }
-      // 更新 last_buy_at（不修改 record_count，那由 ingestTargetTrade 维护）
-      if (sigs.length > 0) {
+      // 只在真正入 buy 时才更新 last_buy_at；避免「拉到卖出/转账就把 last_buy_at 推高」的误导
+      if (recordedCount > 0 && recordedBlockTime) {
         await query(
           'UPDATE monitored_targets SET last_buy_at = to_timestamp($1) WHERE id = $2',
-          [sigs[0].blockTime, t.id],
+          [recordedBlockTime, t.id],
         );
       }
     } catch (err) {
