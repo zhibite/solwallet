@@ -21,7 +21,8 @@ const memoryCache = new Map<string, CacheEntry<any>>();
 type RedisClient = {
   get(key: string): Promise<string | null>;
   set(key: string, value: string, mode?: string, duration?: number): Promise<any>;
-  del(key: string): Promise<number>;
+  // ioredis 原生 del 接受 (key, ...keys) 或 keys: string[] 数组形式，两种都返回删除条数
+  del(key: string | string[]): Promise<number>;
   keys(pattern: string): Promise<string[]>;
   ping(): Promise<string>;
   quit(): Promise<any>;
@@ -141,7 +142,7 @@ export class Cache {
     if (redisEnabled && redis) {
       try {
         const keys = await redis.keys('*');
-        if (keys.length > 0) await redis.del(...(keys as [string, ...string[]]));
+        if (keys.length > 0) await redis.del(keys);
       } catch { /* ignore */ }
     }
     memoryCache.clear();

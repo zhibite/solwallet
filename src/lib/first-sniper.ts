@@ -80,14 +80,16 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
   if (!block) return emptyResult;
 
   // 3) 解析出所有买入 mint 的 tx（同 slot）
-  const sameSlotBuys = parseBlockTxs(block, mint);
+  //    rpc.getBlock 返回的是 @solana/web3.js 的 BlockResponse（versioned transaction）
+  //    parseBlockTxs 内部已经兼容（message 用 any），这里 cast 一下绕开 TS 结构差异
+  const sameSlotBuys = parseBlockTxs(block as any, mint);
 
   // 4) 尝试拉取下一 slot 的交易（跟随者通常落在 slot+1）
   let nextSlotBuys: ParsedBuy[] = [];
   try {
     const nextBlock = await rpc.getBlock(slotNum + 1, { transactionDetails: 'full' });
     if (nextBlock) {
-      nextSlotBuys = parseBlockTxs(nextBlock, mint);
+      nextSlotBuys = parseBlockTxs(nextBlock as any, mint);
     }
   } catch (err) {
     // 下一 slot 可能尚未确认/已跳过，静默失败
