@@ -3,6 +3,7 @@ import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import AddressCopy from "@/components/common/AddressCopy";
 import SolAmount from "@/components/common/SolAmount";
+import PrioSolAmount from "@/components/common/PrioSolAmount";
 
 interface PoolMember {
   id: number;
@@ -168,11 +169,11 @@ export default function PoolPage() {
                 <th className="px-3 py-2 text-center font-medium">角色</th>
                 <th className="px-3 py-2 text-center font-medium">出现次数</th>
                 <th className="px-3 py-2 text-center font-medium">跟随目标</th>
-                <th className="px-3 py-2 text-center font-medium">FS / Fol</th>
+                <th className="px-3 py-2 text-center font-medium">首狙 / 跟随</th>
                 <th className="px-3 py-2 text-right font-medium">均买入 SOL</th>
                 <th className="px-3 py-2 text-right font-medium">评分</th>
                 <th className="px-3 py-2 text-right font-medium">推荐 TIP</th>
-                <th className="px-3 py-2 text-right font-medium">推荐 PRIO</th>
+                <th className="px-3 py-2 text-right font-medium">推荐 PRIO (SOL)</th>
                 <th className="px-3 py-2 text-left font-medium">最近出现</th>
                 <th className="px-3 py-2 text-center font-medium">操作</th>
               </tr>
@@ -199,8 +200,8 @@ export default function PoolPage() {
                         {m.role}
                       </span>
                     </td>
-                    <td className="px-3 py-2 text-center font-mono">{m.freq}</td>
-                    <td className="px-3 py-2 text-center font-mono">{m.distinct_targets}</td>
+                    <td className="px-3 py-2 text-center font-mono text-gray-900 dark:text-white">{m.freq}</td>
+                    <td className="px-3 py-2 text-center font-mono text-gray-900 dark:text-white">{m.distinct_targets}</td>
                     <td className="px-3 py-2 text-center text-xs text-gray-500">
                       {m.seen_as_first_sniper} / {m.seen_as_follower}
                     </td>
@@ -209,8 +210,8 @@ export default function PoolPage() {
                     <td className="px-3 py-2 text-right">
                       {m.recommended_tip_sol ? <SolAmount value={m.recommended_tip_sol} /> : <span className="text-gray-400">-</span>}
                     </td>
-                    <td className="px-3 py-2 text-right font-mono text-xs">
-                      {m.recommended_prio_lamports ? m.recommended_prio_lamports.toLocaleString() : <span className="text-gray-400">-</span>}
+                    <td className="px-3 py-2 text-right">
+                      {m.recommended_prio_lamports ? <PrioSolAmount value={m.recommended_prio_lamports} /> : <span className="text-gray-400">-</span>}
                     </td>
                     <td className="px-3 py-2 text-xs text-gray-500">
                       {new Date(m.last_seen_at).toLocaleString('zh-CN', { hour12: false }).slice(5)}

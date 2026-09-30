@@ -2,6 +2,7 @@
 import React, { useState, useMemo } from "react";
 import AddressCopy from "@/components/common/AddressCopy";
 import SolAmount from "@/components/common/SolAmount";
+import PrioSolAmount from "@/components/common/PrioSolAmount";
 import RelativeTime from "@/components/common/RelativeTime";
 import { CheckLineIcon, CloseLineIcon } from "@/icons";
 
@@ -245,7 +246,7 @@ export default function AnalysisForm() {
                     <th className="px-3 py-2 text-right">SOL</th>
                     <th className="px-3 py-2 text-right">收益</th>
                     <th className="px-3 py-2 text-right">TIP</th>
-                    <th className="px-3 py-2 text-right">优先级费</th>
+                    <th className="px-3 py-2 text-right">优先级费 (SOL)</th>
                     <th className="px-3 py-2 text-left">TXID</th>
                     <th className="px-3 py-2 text-center">状态</th>
                     <th className="px-3 py-2 text-left">跟单目标</th>
@@ -263,7 +264,7 @@ export default function AnalysisForm() {
                         <td className="px-3 py-2 text-right"><SolAmount value={t.sol} /></td>
                         <td className="px-3 py-2 text-right"><SolAmount value={t.pnl} signed /></td>
                         <td className="px-3 py-2 text-right"><SolAmount value={t.tip} /></td>
-                        <td className="px-3 py-2 text-right font-mono text-xs">{t.prio}</td>
+                        <td className="px-3 py-2 text-right"><PrioSolAmount value={t.prio} /></td>
                         <td className="px-3 py-2">
                           <a
                             href={`https://solscan.io/tx/${t.txid}`}

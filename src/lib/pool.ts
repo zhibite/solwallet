@@ -75,16 +75,26 @@ export async function scanForTarget(opts: {
   const limit = opts.limit ?? SCAN_TRADES_PER_TARGET;
   const sinceTs = opts.sinceTs ?? 0;
 
-  // 1) 拉这个 target 最近 N 笔 target_trades
+  // 0) 读取水位线（NULL → epoch 0），保证 BFS 幂等：
+  //    只扫 block_time > watermark 的新 trade，避免被 monitor 实时触发 + pool-worker
+  //    周期触发互相叠加导致 freq / seen_as_* 双倍累加。
+  const watermarkRow = await queryOne<{ wm: string | null }>(`
+    SELECT last_scanned_block_time AS wm
+    FROM monitored_targets WHERE address = $1
+  `, [opts.targetAddress]);
+  const watermark: Date = watermarkRow?.wm ? new Date(watermarkRow.wm) : new Date(0);
+
+  // 1) 拉这个 target 水位线之后的新 trade
   const trades = await query<any>(`
     SELECT signature, slot, mint, buy_sol, target_address, block_time
     FROM target_trades
-    WHERE target_address = $1 AND EXTRACT(epoch FROM block_time) >= $2
-    ORDER BY block_time DESC
+    WHERE target_address = $1 AND block_time > $2
+    ORDER BY block_time ASC
     LIMIT $3
-  `, [opts.targetAddress, sinceTs, limit]);
+  `, [opts.targetAddress, watermark, limit]);
 
   if (trades.length === 0) {
+    // 没有新 trade，仍推进一次水位线（防止 watermark 是过去某个时间导致永远不更新）
     return { newMembers: 0, updatedMembers: 0, newEdges: 0, updatedEdges: 0 };
   }
 
@@ -233,10 +243,10 @@ export async function scanForTarget(opts: {
         ...Array.from(m.mints),
       ])).slice(-100);
 
-      const newFreq = (cur.freq ?? 0) + m.freq;
-      const newFirstSniper = (cur.seen_as_first_sniper ?? 0) + m.seen_as_first_sniper;
-      const newFollower = (cur.seen_as_follower ?? 0) + m.seen_as_follower;
-      const prevBuySolSum = (parseFloat(cur.avg_buy_sol ?? '0') * (cur.freq ?? 0)) + m.buySolSum;
+      const newFreq = Number(cur.freq ?? 0) + m.freq;
+      const newFirstSniper = Number(cur.seen_as_first_sniper ?? 0) + m.seen_as_first_sniper;
+      const newFollower = Number(cur.seen_as_follower ?? 0) + m.seen_as_follower;
+      const prevBuySolSum = (parseFloat(cur.avg_buy_sol ?? '0') * Number(cur.freq ?? 0)) + m.buySolSum;
       const newAvgBuySol = prevBuySolSum / Math.max(newFreq, 1);
 
       // distinct_targets: 用 cardinality array_length 不可靠，重新计算
@@ -274,11 +284,11 @@ export async function scanForTarget(opts: {
       );
       newEdges++;
     } else {
-      const newFreq = (cur.freq ?? 0) + e.freq;
-      const newSameSlot = (cur.same_slot_count ?? 0) + e.sameSlot;
-      const newNextSlot = (cur.next_slot_count ?? 0) + e.nextSlot;
-      const newWin = (cur.win_count ?? 0) + e.win;
-      const newFail = (cur.fail_count ?? 0) + e.fail;
+      const newFreq = Number(cur.freq ?? 0) + e.freq;
+      const newSameSlot = Number(cur.same_slot_count ?? 0) + e.sameSlot;
+      const newNextSlot = Number(cur.next_slot_count ?? 0) + e.nextSlot;
+      const newWin = Number(cur.win_count ?? 0) + e.win;
+      const newFail = Number(cur.fail_count ?? 0) + e.fail;
 
       await query(
         `UPDATE pool_edges
@@ -290,6 +300,21 @@ export async function scanForTarget(opts: {
       updatedEdges++;
     }
   }
+
+  // 7) 推进水位线 = MAX(trades.block_time)
+  //    即使没有 member/edge 变化，只要扫到了 trade 也要推进，否则下次会重扫同样的 trade。
+  const newWatermark = trades.reduce<Date>(
+    (acc, t) => (acc > new Date(t.block_time) ? acc : new Date(t.block_time)),
+    watermark,
+  );
+  await query(
+    `UPDATE monitored_targets
+       SET last_scanned_block_time = $2,
+           updated_at = NOW()
+     WHERE address = $1
+       AND (last_scanned_block_time IS NULL OR last_scanned_block_time < $2)`,
+    [opts.targetAddress, newWatermark],
+  );
 
   return { newMembers, updatedMembers, newEdges, updatedEdges };
 }

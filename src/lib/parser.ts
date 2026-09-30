@@ -65,7 +65,11 @@ export function calcBuySol(tx: HeliusEnhancedTx): number {
 
   const outLamports = tx.nativeTransfers
     .filter((t) => t.fromUserAccount === tx.feePayer)
-    .reduce((sum, t) => sum + t.amount, 0);
+    .reduce((sum, t) => {
+      // Helius 新版 API 返回的 amount 是字符串，需要转 number 再相加
+      const amt = typeof t.amount === 'string' ? Number(t.amount) : t.amount;
+      return sum + amt;
+    }, 0);
 
   // 转换 lamports -> SOL（再加回 fee 与 tip 才是真正的 buy 支出）
   // 但注意：fee 与 tip 都在 nativeTransfers 中体现（如果是 tip，则有 transfer 给 tip account）
@@ -73,24 +77,64 @@ export function calcBuySol(tx: HeliusEnhancedTx): number {
   return outLamports / LAMPORTS_PER_SOL;
 }
 
+/**
+ * Jito 8 个 tip 收款账户（写死的版本；启动时若 `JITO_TIP_ACCOUNTS_REFRESH=1`
+ * 会从 https://mainnet.block-engine.jito.wtf/api/v1/getTipAccounts 重新拉，覆盖这份静态表）
+ *
+ * 快照自 2025/09/30 实际请求：
+ *   DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL
+ *   HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe
+ *   Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY
+ *   96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5
+ *   ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49
+ *   3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT
+ *   DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh
+ *   ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt
+ */
+export let JITO_TIP_ACCOUNTS: ReadonlySet<string> = new Set([
+  'DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL',
+  'HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe',
+  'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY',
+  '96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5',
+  'ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49',
+  '3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT',
+  'DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh',
+  'ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt',
+]);
+
+/**
+ * 从 Jito block engine 实时刷新 tip accounts（覆盖上面的静态表）。
+ * 失败时保留旧值。
+ */
+export async function refreshJitoTipAccounts(): Promise<{ ok: boolean; source: string; count: number }> {
+  try {
+    const r = await fetch('https://mainnet.block-engine.jito.wtf/api/v1/getTipAccounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getTipAccounts', params: [] }),
+    });
+    const j: any = await r.json();
+    if (Array.isArray(j?.result) && j.result.length >= 1) {
+      JITO_TIP_ACCOUNTS = new Set(j.result);
+      return { ok: true, source: 'live', count: j.result.length };
+    }
+    return { ok: false, source: 'live(empty)', count: 0 };
+  } catch (e) {
+    return { ok: false, source: 'live(error)', count: 0 };
+  }
+}
+
 /** 计算 jito tip（转账给 8 个 jito tip account 中的一个） */
 export function calcJitoTip(tx: HeliusEnhancedTx): number {
   if (!tx.nativeTransfers) return 0;
-  const JITO_TIP_ACCOUNTS = [
-    '96gYZGLnJYVFmbLzopPSmXAwG5Mo2ckB8Z7uVwYxiwQ5',
-    'ADuotR6KkC1i2sccT6RP3jMMLzrEgzVa4LAmQ4ZmFn3J',
-    'DttWaMuVvTiduZRnguL7h9xJm5wP3iYpfkRJTg3MWBPJ',
-    '3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPd1deFiritQLxj9',
-    'HFqU5x63VTqvQss8hp11i4wV8JEodzctd55h2P8iF4jH',
-    'ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49',
-    'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLv9Y',
-    'DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcUWND9jf',
-  ];
-  const tipSet = new Set(JITO_TIP_ACCOUNTS);
 
   const tipLamports = tx.nativeTransfers
-    .filter((t) => tipSet.has(t.toUserAccount))
-    .reduce((sum, t) => sum + t.amount, 0);
+    .filter((t) => JITO_TIP_ACCOUNTS.has(t.toUserAccount))
+    .reduce((sum, t) => {
+      // Helius nativeTransfers[].amount 在新版 API 是字符串，直接 + 会触发字符串拼接
+      const amt = typeof t.amount === 'string' ? Number(t.amount) : t.amount;
+      return sum + amt;
+    }, 0);
 
   return tipLamports / LAMPORTS_PER_SOL;
 }

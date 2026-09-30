@@ -3,6 +3,7 @@ import React, { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import AddressCopy from "@/components/common/AddressCopy";
 import SolAmount from "@/components/common/SolAmount";
+import PrioSolAmount from "@/components/common/PrioSolAmount";
 import RelativeTime from "@/components/common/RelativeTime";
 
 interface Buyer {
@@ -231,7 +232,7 @@ export default function BlockDetail() {
                 <th className="px-3 py-2 text-left">地址</th>
                 <th className="px-3 py-2 text-right">买入 SOL</th>
                 <th className="px-3 py-2 text-right">TIP</th>
-                <th className="px-3 py-2 text-right">优先级费</th>
+                <th className="px-3 py-2 text-right">优先级费 (SOL)</th>
                 <th className="px-3 py-2 text-right">跟单收益</th>
                 <th className="px-3 py-2 text-center">结果</th>
                 <th className="px-3 py-2 text-center">版本</th>
@@ -280,7 +281,7 @@ export default function BlockDetail() {
                     </td>
                     <td className="px-3 py-2">
                       {isTarget ? <Badge color="brand">目标</Badge> :
-                       b.is_first_sniper ? <Badge color="success">第一个狙击者</Badge> :
+                       b.is_first_sniper ? <Badge color="success">首狙</Badge> :
                        b.is_own ? <Badge color="warning">我的账号</Badge> :
                        b.is_pre_target ? <Badge color="gray">前置</Badge> :
                        <Badge color="info">跟随</Badge>}
@@ -295,7 +296,9 @@ export default function BlockDetail() {
                     <td className="px-3 py-2 text-right">
                       <SolAmount value={b.tip_sol} />
                     </td>
-                    <td className="px-3 py-2 text-right font-mono text-xs">{b.prio_lamports || 0}</td>
+                    <td className="px-3 py-2 text-right">
+                      <PrioSolAmount value={b.prio_lamports} />
+                    </td>
                     <td className="px-3 py-2 text-right">
                       <SolAmount value={b.pnl_sol} signed />
                     </td>
@@ -382,7 +385,7 @@ export default function BlockDetail() {
       <div className="bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/30 rounded-lg p-4 text-xs text-blue-900 dark:text-blue-300">
         <p className="font-medium mb-1">💡 复盘建议</p>
         <ul className="list-disc list-inside space-y-1">
-          <li>看 <strong>第一个狙击者</strong> 的 TIP 和 PRIO，反推合理的抢单参数</li>
+          <li>看 <strong>首狙</strong> 的 TIP 和 PRIO，反推合理的抢单参数</li>
           <li><strong>偏移</strong>列：正值（红）= 在目标之后多花了 N 笔 tx 才轮到他；负值（绿）= 抢先了 N 笔 tx</li>
           <li><strong>slot+1</strong>（紫）= 跟随者落在了下一个 slot</li>
           <li>关注 <strong>跟随者</strong> 的 buy_sol，看市场跟随热度</li>

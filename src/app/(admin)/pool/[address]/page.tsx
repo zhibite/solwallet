@@ -3,6 +3,7 @@ import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import AddressCopy from "@/components/common/AddressCopy";
 import SolAmount from "@/components/common/SolAmount";
+import PrioSolAmount from "@/components/common/PrioSolAmount";
 import RelativeTime from "@/components/common/RelativeTime";
 
 interface PoolMember {
@@ -199,67 +200,104 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
       </div>
 
       {/* 决策推荐卡 */}
-      <div className="bg-gradient-to-r from-blue-50 to-purple-50 dark:from-blue-500/10 dark:to-purple-500/10 border border-blue-200 dark:border-blue-500/30 rounded-lg p-4">
-        <h3 className="text-sm font-semibold text-gray-800 dark:text-white/90 mb-3">📊 决策建议</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+      <div className="bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 dark:from-blue-500/10 dark:via-indigo-500/10 dark:to-purple-500/10 border border-blue-200/70 dark:border-blue-500/30 rounded-xl p-5 shadow-sm">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-semibold text-gray-800 dark:text-white/90 flex items-center gap-2">
+            <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-white/70 dark:bg-white/5 text-base shadow-sm">📊</span>
+            决策建议
+          </h3>
+          <span className="text-xs px-2 py-0.5 rounded-full bg-white/70 dark:bg-white/5 text-gray-500 dark:text-gray-400 border border-gray-200/60 dark:border-gray-700/60">
+            样本 {fee?.sample_size ?? 0}
+          </span>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {/* 手续费推荐 */}
-          <div>
-            <div className="text-xs text-gray-500 mb-1">手续费推荐（基于 {fee?.sample_size ?? 0} 个样本）</div>
-            <div className="space-y-1">
-              <div className="flex justify-between">
-                <span className="text-gray-600">保守 (P50 success):</span>
-                <span className="font-mono">
-                  tip <SolAmount value={fee?.p50_tip_sol} /> + prio {fee?.p50_prio_lamports?.toLocaleString() ?? 0}
+          <div className="bg-white/70 dark:bg-white/[0.03] rounded-lg p-3 border border-gray-200/60 dark:border-gray-700/40">
+            <div className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 flex items-center gap-1.5">
+              <span className="w-1 h-3 rounded-full bg-blue-500" />
+              手续费推荐
+            </div>
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400 border border-emerald-200/60 dark:border-emerald-500/20">
+                  保守 P50
+                </span>
+                <span className="font-mono text-sm text-gray-800 dark:text-gray-100">
+                  tip <SolAmount value={fee?.p50_tip_sol} /> + prio <PrioSolAmount value={fee?.p50_prio_lamports} />
                 </span>
               </div>
-              <div className="flex justify-between">
-                <span className="text-gray-600">激进 (P75 success):</span>
-                <span className="font-mono">
-                  tip <SolAmount value={fee?.p75_tip_sol} /> + prio {fee?.p75_prio_lamports?.toLocaleString() ?? 0}
+              <div className="flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-400 border border-amber-200/60 dark:border-amber-500/20">
+                  激进 P75
+                </span>
+                <span className="font-mono text-sm text-gray-800 dark:text-gray-100">
+                  tip <SolAmount value={fee?.p75_tip_sol} /> + prio <PrioSolAmount value={fee?.p75_prio_lamports} />
                 </span>
               </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-gray-400">抢单失败的下界参考:</span>
-                <span className="font-mono text-gray-400">
-                  tip <SolAmount value={fee?.failed_p50_tip_sol} /> + prio {fee?.failed_p50_prio_lamports?.toLocaleString() ?? 0}
+              <div className="flex items-center justify-between gap-2 pt-1 border-t border-dashed border-gray-200/60 dark:border-gray-700/40">
+                <span className="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 dark:bg-gray-700/40 dark:text-gray-400 border border-gray-200/60 dark:border-gray-600/40">
+                  失败参考
+                </span>
+                <span className="font-mono text-xs text-gray-500 dark:text-gray-400">
+                  tip <SolAmount value={fee?.failed_p50_tip_sol} /> + prio <PrioSolAmount value={fee?.failed_p50_prio_lamports} />
                 </span>
               </div>
-              <div className="text-xs text-gray-400 mt-1">
-                抢单成功 {fee?.success_count ?? 0} 笔 / 失败 {fee?.failed_count ?? 0} 笔 ·
-                数据样本 <RelativeTime iso={fee?.last_buy_at} />
+              <div className="text-[11px] text-gray-400 dark:text-gray-500 pt-1">
+                抢单成功 {fee?.success_count ?? 0} 笔 / 失败 {fee?.failed_count ?? 0} 笔 · 数据更新 <RelativeTime iso={fee?.last_buy_at} />
               </div>
             </div>
           </div>
+
           {/* 价值评分 */}
-          <div>
-            <div className="text-xs text-gray-500 mb-1">是否值得跟 (Worth Score)</div>
-            <div className="space-y-1">
-              <div className="flex justify-between">
-                <span className="text-gray-600">综合评分:</span>
-                <span className={`font-mono text-lg font-semibold ${
-                  (score?.offered ?? 0) > 1 ? 'text-success-500' :
-                  (score?.offered ?? 0) < -0.5 ? 'text-error-500' : 'text-warning-500'
-                }`}>
-                  {score ? score.offered.toFixed(2) : '-'}
-                </span>
-              </div>
-              <div className="flex justify-between text-xs text-gray-500">
-                <span>成本占比 fee/buy_sol:</span>
+          <div className="bg-white/70 dark:bg-white/[0.03] rounded-lg p-3 border border-gray-200/60 dark:border-gray-700/40">
+            <div className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 flex items-center gap-1.5">
+              <span className="w-1 h-3 rounded-full bg-purple-500" />
+              是否值得跟 (Worth Score)
+            </div>
+            <div className="flex items-baseline gap-2 mb-2">
+              <span className={`font-mono text-3xl font-bold leading-none ${
+                (score?.offered ?? 0) > 1 ? 'text-success-500' :
+                (score?.offered ?? 0) < -0.5 ? 'text-error-500' : 'text-warning-500'
+              }`}>
+                {score ? score.offered.toFixed(2) : '-'}
+              </span>
+              <span className="text-[11px] text-gray-400">综合评分</span>
+            </div>
+            <div className="space-y-1 text-xs">
+              <div className="flex justify-between text-gray-600 dark:text-gray-300">
+                <span>成本占比 fee/buy_sol</span>
                 <span className="font-mono">{((score?.cost_ratio ?? 0) * 100).toFixed(2)}%</span>
               </div>
-              <div className="flex justify-between text-xs text-gray-500">
-                <span>平均手续费:</span>
+              <div className="flex justify-between text-gray-600 dark:text-gray-300">
+                <span>平均手续费</span>
                 <span className="font-mono"><SolAmount value={score?.avg_fee_sol} /></span>
               </div>
-              {score && score.offered > 1 && (
-                <div className="text-xs text-success-600 dark:text-success-400">✓ 推荐跟单</div>
-              )}
-              {score && score.offered < -0.5 && (
-                <div className="text-xs text-error-600 dark:text-error-400">✗ 不推荐 — PnL 为负</div>
-              )}
             </div>
           </div>
         </div>
+
+        {/* 结论 banner */}
+        {score && score.offered > 1 && (
+          <div className="mt-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/30 text-emerald-700 dark:text-emerald-400 text-sm">
+            <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500 text-white text-xs">✓</span>
+            <span className="font-medium">推荐跟单</span>
+            <span className="text-xs opacity-70">综合评分 {score.offered.toFixed(2)}，预期为正</span>
+          </div>
+        )}
+        {score && score.offered < -0.5 && (
+          <div className="mt-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 text-red-700 dark:text-red-400 text-sm">
+            <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-red-500 text-white text-xs">✗</span>
+            <span className="font-medium">不推荐跟单</span>
+            <span className="text-xs opacity-70">PnL 为负 ({score.offered.toFixed(2)})</span>
+          </div>
+        )}
+        {score && score.offered >= -0.5 && score.offered <= 1 && (
+          <div className="mt-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 text-amber-700 dark:text-amber-400 text-sm">
+            <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-amber-500 text-white text-xs">!</span>
+            <span className="font-medium">观望</span>
+            <span className="text-xs opacity-70">收益空间有限 (评分 {score.offered.toFixed(2)})</span>
+          </div>
+        )}
       </div>
 
       {/* 竞争分析 */}
@@ -278,7 +316,7 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
           </Section>
 
           {/* Prio 分布 */}
-          <Section title="抢单手续费 PRIO 分布（success vs failed）">
+          <Section title="抢单手续费 PRIO 分布（SOL, success vs failed）">
             <DistributionChart data={analytics.prioDistribution} max={maxDist(analytics.prioDistribution)} />
           </Section>
 
@@ -299,7 +337,7 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
                     <th className="py-2 px-2 text-center">输</th>
                     <th className="py-2 px-2 text-center">胜率</th>
                     <th className="py-2 px-2 text-right">均 TIP</th>
-                    <th className="py-2 px-2 text-right">均 PRIO</th>
+                    <th className="py-2 px-2 text-right">均 PRIO (SOL)</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -319,7 +357,7 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
                         </span>
                       </td>
                       <td className="py-1.5 px-2 text-right"><SolAmount value={c.avg_tip_sol} /></td>
-                      <td className="py-1.5 px-2 text-right font-mono">{Math.round(c.avg_prio_lamports).toLocaleString()}</td>
+                      <td className="py-1.5 px-2 text-right"><PrioSolAmount value={c.avg_prio_lamports} /></td>
                     </tr>
                   ))}
                 </tbody>
@@ -339,7 +377,7 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
                       <th className="py-2 px-2 text-center">成功</th>
                       <th className="py-2 px-2 text-center">失败</th>
                       <th className="py-2 px-2 text-right">最高 TIP</th>
-                      <th className="py-2 px-2 text-right">最高 PRIO</th>
+                      <th className="py-2 px-2 text-right">最高 PRIO (SOL)</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -350,7 +388,7 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
                         <td className="py-1.5 px-2 text-center text-success-500 font-mono">{t.success_count}</td>
                         <td className="py-1.5 px-2 text-center text-error-500 font-mono">{t.failed_count}</td>
                         <td className="py-1.5 px-2 text-right"><SolAmount value={t.top_tip_sol} /></td>
-                        <td className="py-1.5 px-2 text-right font-mono">{t.top_prio_lamports.toLocaleString()}</td>
+                        <td className="py-1.5 px-2 text-right"><PrioSolAmount value={t.top_prio_lamports} /></td>
                       </tr>
                     ))}
                   </tbody>
@@ -384,7 +422,7 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
                         <AddressCopy address={e.target} />
                       </Link>
                     </td>
-                    <td className="py-1.5 px-2 text-center font-mono">{e.freq}</td>
+                    <td className="py-1.5 px-2 text-center font-mono font-semibold text-brand-500 dark:text-brand-400">{e.freq}</td>
                     <td className="py-1.5 px-2 text-center text-xs">
                       <span className="text-success-500">{e.win_count}</span>
                       <span className="text-gray-300 mx-1">/</span>
@@ -420,7 +458,7 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
                         <AddressCopy address={e.follower} />
                       </Link>
                     </td>
-                    <td className="py-1.5 px-2 text-center font-mono">{e.freq}</td>
+                    <td className="py-1.5 px-2 text-center font-mono font-semibold text-brand-500 dark:text-brand-400">{e.freq}</td>
                     <td className="py-1.5 px-2 text-center text-xs">
                       <span className="text-success-500">{e.win_count}</span>
                       <span className="text-gray-300 mx-1">/</span>
