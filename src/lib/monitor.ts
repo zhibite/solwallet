@@ -155,12 +155,18 @@ export async function ingestTargetTrade(targetId: number, buy: any, rawTx: any) 
 
   // 1) 写 target_trades（COALESCE 兜底，防止 blockTime 为 0/undefined 时 to_timestamp 失败）
   //    用 xmax=0 判定「真实新增」——ON CONFLICT DO UPDATE 触发的更新 xmax ≠ 0
+  //    新增 bundle 元数据（has_alt / bundle_id），bundle_size 由同 bundle 的其他 tx 聚合后回填
   const inserted = await queryOne<{ id: number; was_inserted: boolean }>(`
     INSERT INTO target_trades (
       target_id, signature, slot, block_time, mint, target_address,
-      buy_sol, target_tip_sol, target_prio_lamports, is_bundled, version
-    ) VALUES ($1,$2,$3,to_timestamp(COALESCE(NULLIF($4, 0), EXTRACT(epoch FROM NOW()))),$5,$6,$7,$8,$9,$10,$11)
-    ON CONFLICT (signature) DO UPDATE SET slot = EXCLUDED.slot
+      buy_sol, target_tip_sol, target_prio_lamports, is_bundled, version,
+      has_alt, bundle_id
+    ) VALUES ($1,$2,$3,to_timestamp(COALESCE(NULLIF($4, 0), EXTRACT(epoch FROM NOW()))),$5,$6,$7,$8,$9,$10,$11,$12,$13)
+    ON CONFLICT (signature) DO UPDATE SET
+      slot = EXCLUDED.slot,
+      is_bundled = EXCLUDED.is_bundled,
+      has_alt = EXCLUDED.has_alt,
+      bundle_id = COALESCE(EXCLUDED.bundle_id, target_trades.bundle_id)
     RETURNING id, (xmax = 0) AS was_inserted
   `, [
     targetId,
@@ -174,9 +180,32 @@ export async function ingestTargetTrade(targetId: number, buy: any, rawTx: any) 
     buy.prioLamports,
     buy.isBundled,
     buy.version,
+    buy.hasAlt,
+    buy.bundleId,
   ]);
 
   if (!inserted) return;
+
+  // 1.4) 如果本笔是 bundle 的一部分，把同一 bundle_id 的所有 target_trades 标上 bundle_size
+  //      合并成一条 SQL 避免 SELECT+UPDATE 之间被并发插入污染（race → size=1）
+  //      语义说明：这里 COUNT 的是 target_trades 表内同 bundle_id 的行数；
+  //                monitor 只记录目标 wallet 的买入，所以 jito bundle 内 5 笔 tx 只买 1 个目标时也是 1。
+  //                真实 bundle 大小参考 block_buyers.bundle_size（在 first-sniper 里算）。
+  if (buy.bundleId) {
+    await query(
+      `WITH cnt AS (
+         SELECT bundle_id, COUNT(*)::int AS c
+           FROM target_trades
+          WHERE bundle_id = $1
+          GROUP BY bundle_id
+       )
+       UPDATE target_trades t
+          SET bundle_size = cnt.c
+         FROM cnt
+        WHERE t.bundle_id = cnt.bundle_id`,
+      [buy.bundleId],
+    );
+  }
 
   // 1.5) 真实新增时 +1（webhook 重投 / polling 重复扫到同一个 sig 不会重复计数）
   if (inserted.was_inserted) {
@@ -203,7 +232,8 @@ export async function ingestTargetTrade(targetId: number, buy: any, rawTx: any) 
            SET first_sniper = $1, first_sniper_buy_sol = $2,
                first_sniper_tip_sol = $3, first_sniper_prio_lamports = $4,
                first_sniper_signature = $5,
-               first_sniper_offset_pos = $7
+               first_sniper_offset_pos = $7,
+               first_sniper_offset_ms = $8
            WHERE signature = $6`,
           [
             sniper.address,
@@ -213,6 +243,7 @@ export async function ingestTargetTrade(targetId: number, buy: any, rawTx: any) 
             sniper.signature,
             buy.signature,
             sniper.offsetPos,
+            sniper.offsetMs,
           ],
         );
       }

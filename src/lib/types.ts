@@ -37,6 +37,17 @@ export interface TargetTrade {
   target_tip_sol: string | null;
   target_prio_lamports: number | null;
   is_bundled: boolean;
+  /** 0008: 解析时是否观察到 Address Lookup Table（v0 才有，Helius 路径可能为 null） */
+  has_alt: boolean | null;
+  /** 0008: 同 bundle 多笔共享的 ID */
+  bundle_id: string | null;
+  /**
+   * 0008: 同 bundle_id 在 target_trades 表内的行数。
+   * 注意：≠ Solana bundle 内总 tx 数（monitor 只记录目标 wallet 的买入）；
+   *      同 bundle 内 5 笔 sniper tx 只买 1 个目标 wallet 时，这里也是 1。
+   *      真实 bundle 大小参考 block_buyers.bundle_size。
+   */
+  bundle_size: number | null;
   first_sniper: string | null;
   first_sniper_buy_sol: string | null;
   first_sniper_tip_sol: string | null;
@@ -91,6 +102,12 @@ export interface BlockBuyer {
   result: string | null;
   version: string | null;
   is_bundled: boolean;
+  /** 0008: 解析时是否观察到 Address Lookup Table */
+  has_alt: boolean | null;
+  /** 0008: 同 bundle 多笔共享的 ID */
+  bundle_id: string | null;
+  /** 0008: 同 bundle 内的笔数（≥2 才有意义） */
+  bundle_size: number | null;
 }
 
 /** Helius Enhanced Transaction 简化结构 */

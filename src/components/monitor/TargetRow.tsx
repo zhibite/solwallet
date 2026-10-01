@@ -29,12 +29,19 @@ interface Trade {
   target_tip_sol: string | null;
   target_prio_lamports: number | null;
   is_bundled: boolean;
+  /** 解析时是否观察到 Address Lookup Table（v0 才有，Helius 路径可能为 null） */
+  has_alt: boolean | null;
+  /** 同 bundle 多笔共享的 ID */
+  bundle_id: string | null;
+  /** 同 bundle 的笔数（≥2 才有意义） */
+  bundle_size: number | null;
   first_sniper: string | null;
   first_sniper_buy_sol: string | null;
   first_sniper_tip_sol: string | null;
   first_sniper_prio_lamports: number | null;
   first_sniper_signature: string | null;
   first_sniper_offset_pos: number | null;
+  first_sniper_offset_ms: number | null;
   pnl_sol: string | null;
   status: string;
   // 子表附加列（来自 transactions API JOIN block_buyers）
@@ -45,6 +52,8 @@ interface Trade {
   my_prio_lamports?: number | null;        // 我自己的 prio
   my_signature?: string | null;            // 我自己的 tx sig
   my_result?: string | null;               // 我自己的 result
+  same_slot_count?: number | null;         // 同 slot 买入数（含 target 自己）
+  next_slot_count?: number | null;         // 下一 slot 买入数
 }
 
 interface Props {
@@ -59,14 +68,14 @@ interface Props {
 
 export default function TargetRow({ target, onPause, onResume, onDelete, onClear, onThresholdChange, decisionCell }: Props) {
   const [expanded, setExpanded] = useState(false);
+  const [sniperExpanded, setSniperExpanded] = useState(false);
+  const [sniperKey, setSniperKey] = useState<{ slot: number; mint: string } | null>(null);
   const [trades, setTrades] = useState<Trade[] | null>(null);
   const [loadingTrades, setLoadingTrades] = useState(false);
   const [editingThreshold, setEditingThreshold] = useState(false);
   const [thresholdVal, setThresholdVal] = useState(target.threshold_sol);
 
   // 首狙展开：内联显示该 trade 对应 slot+mint 的 block 级详情
-  const [sniperExpanded, setSniperExpanded] = useState(false);
-  const [sniperKey, setSniperKey] = useState<{ slot: number; mint: string } | null>(null);
 
   const loadTrades = async () => {
     if (trades !== null) return;
@@ -137,6 +146,20 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
     );
   };
 
+  // 格式化「抢到 +Nms」——狙击者相对目标 tx 的时间偏移
+  // 正值 = 狙击者更早（先抢到），负值 = 狙击者比目标晚（跟单）
+  const renderOffsetMs = (ms: number | null | undefined) => {
+    if (ms === null || ms === undefined) return null;
+    // +N → 抢到（早），-N → 落后（晚）
+    const color = ms > 0 ? 'text-success-600' : ms < 0 ? 'text-error-500' : 'text-gray-500';
+    const prefix = ms > 0 ? '抢到' : ms < 0 ? '落后' : '同步';
+    return (
+      <span className={`font-mono ${color}`} title="狙击者相对目标 tx 的时间差 (ms)">
+        {prefix} {ms > 0 ? '+' : ''}{ms}ms
+      </span>
+    );
+  };
+
   return (
     <>
       <tr className="border-b border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-zinc-700/50">
@@ -194,16 +217,19 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
         </td>
         <td className="px-3 py-3">
           {latest && latest.first_sniper && !sniperFailed ? (
-            <button
-              type="button"
+            <div
+              role="button"
+              tabIndex={0}
               onClick={toggleSniperPanel}
-              className={`text-left text-xs space-y-0.5 rounded-md px-1 py-0.5 -mx-1 hover:bg-slate-100 dark:hover:bg-zinc-700/60 transition-colors ${
+              onKeyDown={(e) => e.key === 'Enter' && toggleSniperPanel()}
+              className={`text-left text-xs space-y-0.5 rounded-md px-1 py-0.5 -mx-1 hover:bg-slate-100 dark:hover:bg-zinc-700/60 transition-colors cursor-pointer ${
                 sniperExpanded ? 'bg-brand-50 dark:bg-brand-500/10' : ''
               }`}
               title="点击展开该 slot 的 block 级详情"
             >
               <AddressCopy address={latest.first_sniper} />
               <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-gray-500 dark:text-gray-400">
+                {renderOffsetMs(latest.first_sniper_offset_ms)}
                 {renderOffset(latest.first_sniper_offset_pos)}
                 <span>
                   tip <SolAmount value={latest.first_sniper_tip_sol} />
@@ -215,7 +241,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                   {sniperExpanded ? '收起 ▴' : '块内序 ▾'}
                 </span>
               </div>
-            </button>
+            </div>
           ) : sniperFailed ? (
             <span
               className="inline-flex items-center px-2 py-0.5 rounded text-xs bg-error-50 text-error-700 dark:bg-error-500/15 dark:text-error-400"
@@ -270,6 +296,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                       <th className="py-2 px-2 text-right">狙击 TIP</th>
                       <th className="py-2 px-2 text-right">狙击 PRIO</th>
                       <th className="py-2 px-2 text-right">跟单 SLOT</th>
+                      <th className="py-2 px-2 text-center">狙击→</th>
                       <th className="py-2 px-2 text-center">买家</th>
                       <th className="py-2 px-2 text-center">我的排位</th>
                       <th className="py-2 px-2 text-right">我的 TIP</th>
@@ -293,13 +320,36 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                         <td className="py-1.5 px-2 text-right"><SolAmount value={t.target_tip_sol} /></td>
                         <td className="py-1.5 px-2 text-right"><PrioSolAmount value={t.target_prio_lamports} /></td>
                         <td className="py-1.5 px-2 text-center">
-                          {t.is_bundled ? <span className="text-success-500">✓</span> : <span className="text-gray-300">-</span>}
+                          {t.is_bundled ? (
+                            <span
+                              className="inline-flex items-center gap-1 text-success-600 dark:text-success-400 cursor-help"
+                              title={
+                                `jito bundle\n` +
+                                `tip: ${t.target_tip_sol ?? '0'} SOL\n` +
+                                `has_alt: ${t.has_alt === true ? '✓' : t.has_alt === false ? '×' : '?'}\n` +
+                                (t.bundle_id ? `bundle_id: ${t.bundle_id}\n` : '') +
+                                (t.bundle_size && t.bundle_size > 1
+                                  ? `同 bundle 共 ${t.bundle_size} 笔`
+                                  : '')
+                              }
+                            >
+                              <span>✓</span>
+                              {t.bundle_size && t.bundle_size > 1 && (
+                                <span className="font-mono text-[10px] text-gray-600 dark:text-gray-400">
+                                  {t.bundle_size}笔
+                                </span>
+                              )}
+                            </span>
+                          ) : (
+                            <span className="text-gray-300">-</span>
+                          )}
                         </td>
                         <td className="py-1.5 px-2">
                           {t.first_sniper ? (
                             <div className="flex flex-col gap-0.5">
                               <AddressCopy address={t.first_sniper} />
                               <SolAmount value={t.first_sniper_buy_sol} />
+                              {renderOffsetMs(t.first_sniper_offset_ms)}
                               {renderOffset(t.first_sniper_offset_pos)}
                             </div>
                           ) : <span className="text-gray-400">-</span>}
@@ -321,6 +371,19 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                               →
                             </a>
                           ) : <span className="text-gray-300">-</span>}
+                        </td>
+                        <td className="py-1.5 px-2 text-center font-mono text-xs">
+                          {(() => {
+                            const same = t.same_slot_count ?? 0;
+                            const next = t.next_slot_count ?? 0;
+                            const total = same + next;
+                            if (total === 0) return <span className="text-gray-300">-</span>;
+                            return (
+                              <span title={`同 slot ${same} + 下一 slot ${next}`} className="text-gray-700 dark:text-gray-300">
+                                {total}
+                              </span>
+                            );
+                          })()}
                         </td>
                         <td className="py-1.5 px-2 text-center">
                           {myPos ? (

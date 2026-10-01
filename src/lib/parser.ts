@@ -42,6 +42,8 @@ export interface ParsedBuy {
   fee: number;              // 总手续费（含 base + priority + tip）
   version: 'v0' | 'legacy';
   isBundled: boolean;
+  hasAlt: boolean | null;   // 是否观察到 Address Lookup Table（fallback 适配器写；Helius 路径为 null）
+  bundleId: string | null;  // 同 bundle 的多笔共享同一 ID
   source: string;           // pump.fun / raydium / jupiter 等
   success: boolean;
   tokenAmount?: number;
@@ -192,14 +194,66 @@ export function calcPriorityFee(tx: HeliusEnhancedTx): number {
   return Math.max(parsed, fallback);
 }
 
-/** 是否为 bundled transaction（含 Address Lookup Table） */
+/** 是否为 bundled transaction */
 export function isBundled(tx: HeliusEnhancedTx): boolean {
-  // v0 + 有 ALT 通常是 jito bundle
-  // HeliusEnhancedTx 不暴露 addressTableLookups 字段，但 fallback 适配器会写 _hasAlt
-  // (见 solanaTxToHeliusEnhanced)。有 _hasAlt=false 时强制 false（避免误判普通 v0）。
+  // 强信号：付了 jito tip → 必是 jito bundle（tip 是 bundle 唯一可靠的强信号）
+  // 注意：calcJitoTip 用的是 nativeTransfers，转账给 8 个 jito tip account 之一即算。
+  if (calcJitoTip(tx) > 0) return true;
+
+  // 次信号：fallback 适配器（solanaTxToHeliusEnhanced）显式观察到了 Address Lookup Table。
+  // v0 + ALT 通常表示 jito bundle（jito bundle 强制用 ALT 来塞多笔 tx）。
   const hasAlt = (tx as any)._hasAlt as boolean | undefined;
+  if (hasAlt === true) return true;
   if (hasAlt === false) return false;
-  return tx.version === 0;
+
+  // Helius Enhanced 路径拿不到 ALT 信息：保守返回 false。
+  // 旧实现直接用 `tx.version === 0` 会把所有 v0 tx 误判为 bundle，包括普通 v0 交易（Solana 上极常见）。
+  return false;
+}
+
+/** 是否观察到 Address Lookup Table（fallback 适配器会用此字段） */
+export function txHasAlt(tx: HeliusEnhancedTx): boolean | null {
+  const hasAlt = (tx as any)._hasAlt as boolean | undefined;
+  // undefined → null（Helius Enhanced 路径拿不到 ALT 信息），便于前端区分"未知 / 确认 false / 确认 true"
+  return hasAlt === undefined ? null : hasAlt;
+}
+
+/**
+ * 计算 bundle_id：用于把同 bundle 的多笔 tx 串起来。
+ *
+ * 设计：
+ *   - 同 jito bundle 内多笔 tx 通常 feePayer 各不相同（每个 wallet 各付各的 tip），
+ *     因此 bundle_id 不能把 feePayer 算进去；否则同 bundle 的不同 tx 会被误判成不同 bundle。
+ *   - 真实 jito bundle 内多笔 tx 共享：slot + jito tip account + tip amount
+ *     （bundle 由 tip 账户 + tip 金额 + slot 共同标识，validator 看到的是一组同时落地）。
+ *   - 没 tip 时（fallback 解析失败 / Helius Enhanced 路径）：用 (slot, hasAlt flag) 当弱 ID，
+ *     不含 feePayer；这意味着 v0+ALT 同 slot 多笔会被聚合到同一 bundle_id（够用但不精确）。
+ *
+ * 返回 null 表示「不是 bundle」或「数据不足，无法归类」。
+ */
+export function computeBundleId(tx: HeliusEnhancedTx): string | null {
+  if (!tx?.slot) return null;
+
+  const tipAccount = (tx.nativeTransfers ?? []).find((t) =>
+    JITO_TIP_ACCOUNTS.has(t.toUserAccount),
+  );
+  const tipAmount = tipAccount
+    ? (typeof tipAccount.amount === 'string' ? Number(tipAccount.amount) : tipAccount.amount)
+    : 0;
+
+  // 没 tip 也没 ALT：肯定不是 bundle（普通 v0 legacy tx）
+  if (tipAmount <= 0 && txHasAlt(tx) !== true) return null;
+
+  // 仅用 (slot, tipAccount, tipAmount) 做 hash——feePayer 故意不参与，
+  // 让同 bundle 的不同 tx 共享 bundle_id。注意 tipAccount 为空时也参与 hash，
+  // 这样 hash 在「同 slot 同 ALT 但 tip 信息缺失」的场景下还能稳定聚类。
+  const key = `${tx.slot}|${tipAccount?.toUserAccount ?? ''}|${tipAmount}`;
+  let h = 0x811c9dc5;
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return `bd_${(h >>> 0).toString(16).padStart(8, '0')}`;
 }
 
 /** 标准化 Helius tx 为 ParsedBuy */
@@ -224,8 +278,14 @@ export function parseHeliusTx(tx: HeliusEnhancedTx): ParsedBuy | null {
     fee: tx.fee ?? 0,
     version: tx.version === 0 ? 'v0' : 'legacy',
     isBundled: isBundled(tx),
+    hasAlt: txHasAlt(tx),
+    bundleId: computeBundleId(tx),
     source: tx.source ?? '',
-    success: !tx.fee || true, // fee 存在表示已上链；err 信息在 events
+    // success 判定：
+    //   - Helius Enhanced Transactions API 在 tx 失败时通常带 transactionError 字段（非 null）
+    //   - 拿不到时（webhook payload 等）默认 true（feePayer 已收 token = 买入成功完成）
+    // 注：旧实现 `!tx.fee || true` 因 `|| true` 永远为 true，是个 dead branch。
+    success: !(tx as any).transactionError,
     tokenAmount: tx.tokenTransfers?.[0]?.tokenAmount,
   };
 }
@@ -269,6 +329,24 @@ export function parseBlockTxs(
       const preMap = new Map<string, any>();
       for (const p of preToken) preMap.set(`${p.accountIndex}-${p.mint}`, p);
 
+      // 用 solanaTxToHeliusEnhanced 把 RPC 原始 tx 适配成 Helius 形状，
+      // 这样 calcJitoTip / calcPriorityFee 就能在 Helius Enhanced 限流时仍然
+      // 从 instructions + nativeTransfers 里算出真实的 tip / prio。
+      // 旧实现 tipSol 硬编码 0，导致 Helius 429 fallback 时 first_sniper_tip_sol 全 0。
+      const enhanced = solanaTxToHeliusEnhanced({
+        slot: (block as any).slot ?? 0,
+        blockTime: block.blockTime ?? 0,
+        transaction: wrapper.transaction as any,
+        meta: wrapper.meta as any,
+      } as TransactionResponse);
+      const tipSol = enhanced ? calcJitoTip(enhanced) : 0;
+      const prioLamports = enhanced
+        ? calcPriorityFee(enhanced)
+        : Math.max(0, (meta.fee ?? 0) - 5000);
+      const bundleId = enhanced ? computeBundleId(enhanced) : null;
+      const hasAltVal = enhanced ? txHasAlt(enhanced) : null;
+      const isBundledVal = enhanced ? isBundled(enhanced) : false;
+
       for (const post of postToken) {
         if (post.owner !== feePayer) continue;
         if (targetMint && post.mint !== targetMint) continue;
@@ -281,7 +359,6 @@ export function parseBlockTxs(
         if (delta > 0) {
           const solOut = (preBal0 - postBal0) / LAMPORTS_PER_SOL;
           const isVersioned = !!msg.addressTableLookups || !!msg.staticAccountKeys;
-          const hasAlt = isVersioned && Array.isArray(msg.addressTableLookups) && msg.addressTableLookups.length > 0;
           result.push({
             signature: sig,
             slot: 0, // block 上下文无 slot 信息，由调用方补
@@ -289,11 +366,13 @@ export function parseBlockTxs(
             address: feePayer,
             mint: post.mint,
             buySol: solOut,
-            tipSol: 0,    // RPC fallback 难算 tip（block context 没有 native transfers 精细计算）
-            prioLamports: Math.max(0, (meta.fee ?? 0) - 5000),
+            tipSol,
+            prioLamports,
             fee: meta.fee ?? 0,
             version: isVersioned ? 'v0' : 'legacy',
-            isBundled: isVersioned && hasAlt,
+            isBundled: isBundledVal,
+            hasAlt: hasAltVal,
+            bundleId,
             source: '',
             success: true,
             tokenAmount: delta,

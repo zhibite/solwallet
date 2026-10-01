@@ -23,6 +23,8 @@ export interface AnalyzeBuyer {
   result: 'success' | 'failed';
   version: string;
   isBundled: boolean;
+  hasAlt: boolean | null;
+  bundleId: string | null;
   mark: 'first_sniper' | 'target' | 'follower' | 'own' | 'pre_target';
 }
 
@@ -180,6 +182,8 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
       result: e.buy.success ? 'success' : 'failed',
       version: e.buy.version,
       isBundled: e.buy.isBundled,
+      hasAlt: e.buy.hasAlt ?? null,
+      bundleId: e.buy.bundleId ?? null,
       mark,
     };
   });
@@ -206,7 +210,8 @@ async function fetchBuyBySig(signature: string): Promise<ParsedBuy | null> {
   const row = await queryOne<any>(`
     SELECT signature, slot, block_time, target_address AS address, mint, buy_sol,
            target_tip_sol AS tip_sol, target_prio_lamports AS prio_lamports, 'success'::text AS success,
-           COALESCE(version, 'legacy') AS version, COALESCE(is_bundled, false) AS is_bundled, '' AS source
+           COALESCE(version, 'legacy') AS version, COALESCE(is_bundled, false) AS is_bundled,
+           has_alt, bundle_id, '' AS source
     FROM target_trades WHERE signature = $1
   `, [signature]);
   if (!row) return null;
@@ -222,6 +227,8 @@ async function fetchBuyBySig(signature: string): Promise<ParsedBuy | null> {
     fee: 0,
     version: row.version,
     isBundled: row.is_bundled,
+    hasAlt: row.has_alt ?? null,
+    bundleId: row.bundle_id ?? null,
     source: row.source,
     success: row.success === 'success',
   };
@@ -283,14 +290,17 @@ export async function saveBlockAnalysis(
     }
 
     // 插入每个 buyer
+    // bundle_size 统计：先插完所有 buyer，再统一回填（按 bundle_id 聚合）
+    const bundleIdCounts = new Map<string, number>();
     for (const b of result.buyers) {
       await client.query(
         `INSERT INTO block_buyers (
            block_analysis_id, slot, block_index, offset_pos, offset_ms, slot_offset,
            signature, address, buy_sol, tip_sol, prio_lamports,
            is_first_sniper, is_follower, is_own, is_pre_target,
-           result, version, is_bundled
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+           result, version, is_bundled,
+           has_alt, bundle_id
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
         [
           analysisId,
           b.slotOffset === 0 ? slot : slot + 1,
@@ -310,7 +320,21 @@ export async function saveBlockAnalysis(
           b.result,
           b.version,
           b.isBundled,
+          b.hasAlt,
+          b.bundleId,
         ],
+      );
+      if (b.bundleId) {
+        bundleIdCounts.set(b.bundleId, (bundleIdCounts.get(b.bundleId) ?? 0) + 1);
+      }
+    }
+    // 回填每个 bundle_id 的 size
+    // 限定 block_analysis_id 是对的：同一 jito bundle 必然落在同一 slot，
+    // 因而必然落在同一 block_analyses；不同 block_analyses 的同 bundle_id 一定是误判或数据污染。
+    for (const [bid, cnt] of bundleIdCounts) {
+      await client.query(
+        `UPDATE block_buyers SET bundle_size = $1 WHERE bundle_id = $2 AND block_analysis_id = $3`,
+        [cnt, bid, analysisId],
       );
     }
     return analysisId;

@@ -31,6 +31,9 @@ interface Buyer {
   result: string;
   version: string;
   is_bundled: boolean;
+  has_alt: boolean | null;
+  bundle_id: string | null;
+  bundle_size: number | null;
 }
 
 interface Analysis {
@@ -296,7 +299,24 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
                        b.is_own ? <Badge color="warning">我的账号</Badge> :
                        b.is_pre_target ? <Badge color="gray">前置</Badge> :
                        <Badge color="info">跟随</Badge>}
-                      {b.is_bundled && <span className="ml-1 text-xs text-success-500" title="bundled">⚡</span>}
+                      {b.is_bundled && (
+                        <span
+                          className="ml-1 text-xs text-success-500 cursor-help"
+                          title={
+                            `jito bundle\n` +
+                            `tip: ${b.tip_sol ?? '0'} SOL\n` +
+                            `has_alt: ${b.has_alt === true ? '✓' : b.has_alt === false ? '×' : '?'}\n` +
+                            (b.bundle_id ? `bundle_id: ${b.bundle_id}\n` : '') +
+                            (b.bundle_size && b.bundle_size > 1
+                              ? `同 bundle 共 ${b.bundle_size} 笔`
+                              : '')
+                          }
+                        >
+                          ⚡{b.bundle_size && b.bundle_size > 1 ? (
+                            <span className="font-mono text-[10px] ml-0.5">{b.bundle_size}</span>
+                          ) : null}
+                        </span>
+                      )}
                     </td>
                     <td className="px-3 py-2">
                       <AddressCopy address={b.address} length={4} />

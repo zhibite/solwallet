@@ -1,6 +1,5 @@
 "use client";
 import React, { useState, useEffect, useCallback } from "react";
-import AddressCopy from "@/components/common/AddressCopy";
 import PrioSolAmount from "@/components/common/PrioSolAmount";
 import AddTargetForm from "./AddTargetForm";
 import TargetRow from "./TargetRow";
@@ -35,78 +34,35 @@ interface Stats {
   analyzed: number;
 }
 
-interface OwnWallet {
-  id: number;
-  address: string;
-  label: string | null;
-}
-
 export default function MonitorList() {
   const [targets, setTargets] = useState<Target[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false); // 静默刷新，不遮挡列表
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'paused'>('all');
   const [busy, setBusy] = useState<null | 'cleanup' | 'clearAll'>(null);
 
-  // 我的钱包
-  const [ownWallets, setOwnWallets] = useState<OwnWallet[]>([]);
-  const [walletAddr, setWalletAddr] = useState('');
-  const [walletLabel, setWalletLabel] = useState('');
-  const [walletBusy, setWalletBusy] = useState(false);
-  const [walletError, setWalletError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (isSilent = false) => {
+    if (isSilent) setRefreshing(true);
+    else setLoading(true);
     try {
-      const [tRes, sRes, wRes] = await Promise.all([
+      const [tRes, sRes] = await Promise.all([
         fetch('/api/targets').then((r) => r.json()),
         fetch('/api/stats').then((r) => r.json()),
-        fetch('/api/wallets').then((r) => r.json()),
       ]);
       if (tRes.ok) setTargets(tRes.data);
       if (sRes.ok) setStats(sRes.data);
-      if (wRes.ok) setOwnWallets(wRes.data);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, []);
 
   useEffect(() => {
-    load();
-    const t = setInterval(load, 15_000);
+    load(false);
+    const t = setInterval(() => load(true), 15_000);
     return () => clearInterval(t);
   }, [load]);
-
-  const addWallet = async () => {
-    setWalletError(null);
-    if (!walletAddr || walletAddr.length < 32 || walletAddr.length > 44) {
-      setWalletError('请输入合法的 Solana 地址 (32-44 字符)');
-      return;
-    }
-    setWalletBusy(true);
-    try {
-      const res = await fetch('/api/wallets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ address: walletAddr, label: walletLabel || undefined }),
-      });
-      const json = await res.json();
-      if (!json.ok) throw new Error(json.error);
-      setWalletAddr('');
-      setWalletLabel('');
-      await load();
-    } catch (err: any) {
-      setWalletError(err.message || '添加失败');
-    } finally {
-      setWalletBusy(false);
-    }
-  };
-
-  const removeWallet = async (id: number) => {
-    if (!confirm('删除此跟单钱包？')) return;
-    await fetch(`/api/wallets?id=${id}`, { method: 'DELETE' });
-    await load();
-  };
 
   const handleAdd = async (data: { address: string; label?: string; threshold_sol: number }) => {
     const res = await fetch('/api/targets', {
@@ -116,20 +72,20 @@ export default function MonitorList() {
     });
     const json = await res.json();
     if (!json.ok) throw new Error(json.error);
-    await load();
+    await load(false);
   };
 
-  const handlePause = async (id: number) => { await fetch(`/api/targets/${id}/pause`, { method: 'POST' }); load(); };
-  const handleResume = async (id: number) => { await fetch(`/api/targets/${id}/resume`, { method: 'POST' }); load(); };
-  const handleDelete = async (id: number) => { if (!confirm('确定删除？')) return; await fetch(`/api/targets/${id}`, { method: 'DELETE' }); load(); };
-  const handleClear = async (id: number) => { if (!confirm('清除所有记录？')) return; await fetch(`/api/targets/${id}/clear`, { method: 'POST' }); load(); };
+  const handlePause = async (id: number) => { await fetch(`/api/targets/${id}/pause`, { method: 'POST' }); load(true); };
+  const handleResume = async (id: number) => { await fetch(`/api/targets/${id}/resume`, { method: 'POST' }); load(true); };
+  const handleDelete = async (id: number) => { if (!confirm('确定删除？')) return; await fetch(`/api/targets/${id}`, { method: 'DELETE' }); load(true); };
+  const handleClear = async (id: number) => { if (!confirm('清除所有记录？')) return; await fetch(`/api/targets/${id}/clear`, { method: 'POST' }); load(true); };
   const handleThreshold = async (id: number, val: number) => {
     await fetch(`/api/targets/${id}/threshold`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ threshold_sol: val }),
     });
-    load();
+    load(true);
   };
 
   const handleCleanup = async () => {
@@ -140,7 +96,7 @@ export default function MonitorList() {
       const json = await res.json();
       if (json.ok) alert(`已清理 ${json.deleted} 条旧记录`);
       else alert(`失败: ${json.error}`);
-      await load();
+      await load(false);
     } finally {
       setBusy(null);
     }
@@ -155,7 +111,7 @@ export default function MonitorList() {
       const json = await res.json();
       if (json.ok) alert(`已清空 ${json.deleted.trades} 条交易、${json.deleted.analyses} 条分析`);
       else alert(`失败: ${json.error}`);
-      await load();
+      await load(false);
     } finally {
       setBusy(null);
     }
@@ -173,65 +129,6 @@ export default function MonitorList() {
         <StatCard label="已分析" value={stats?.analyzed ?? '-'} />
       </div>
 
-      {/* 我的钱包 */}
-      <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-        <div className="flex items-center justify-between mb-2">
-          <h2 className="text-sm font-semibold text-gray-800 dark:text-white/90">我的钱包</h2>
-          <span className="text-xs text-gray-500 dark:text-gray-400">我自己跟单的地址（用来算我在抢单里的排位）</span>
-        </div>
-        <div className="flex flex-wrap gap-2 items-end">
-          <div className="flex-1 min-w-[280px]">
-            <input
-              type="text"
-              value={walletAddr}
-              onChange={(e) => setWalletAddr(e.target.value.trim())}
-              placeholder="Solana 地址..."
-              className="w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-zinc-700 text-sm font-mono text-gray-800 dark:text-white/90 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-          <div className="w-32">
-            <input
-              type="text"
-              value={walletLabel}
-              onChange={(e) => setWalletLabel(e.target.value)}
-              placeholder="备注"
-              className="w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-zinc-700 text-sm text-gray-800 dark:text-white/90 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-          <button
-            onClick={addWallet}
-            disabled={walletBusy}
-            className="h-10 px-4 rounded-xl bg-brand-500 hover:bg-brand-600 disabled:opacity-50 text-white text-sm font-medium flex items-center gap-1"
-          >
-            <span>+</span>
-            {walletBusy ? '添加中...' : '添加'}
-          </button>
-        </div>
-        {walletError && <p className="mt-2 text-xs text-error-500">{walletError}</p>}
-        {ownWallets.length > 0 ? (
-          <div className="flex flex-wrap gap-2 mt-3">
-            {ownWallets.map((w) => (
-              <div
-                key={w.id}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-warning-50 dark:bg-warning-500/10 border border-warning-200 dark:border-warning-500/30"
-              >
-                <AddressCopy address={w.address} length={6} />
-                {w.label && <span className="text-xs text-gray-500 dark:text-gray-400">({w.label})</span>}
-                <button
-                  onClick={() => removeWallet(w.id)}
-                  className="text-xs text-gray-400 hover:text-error-500 ml-1"
-                  title="删除此钱包"
-                >
-                  ×
-                </button>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="mt-3 text-xs text-gray-400">尚未添加任何钱包</p>
-        )}
-      </div>
-
       {/* 添加目标 + 全局操作 */}
       <AddTargetForm onAdd={handleAdd} />
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -241,10 +138,11 @@ export default function MonitorList() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => load()}
-            className="h-8 px-3 rounded-lg bg-slate-100 dark:bg-zinc-700 hover:bg-slate-200 dark:hover:bg-zinc-600 text-gray-600 dark:text-gray-300 text-xs"
+            onClick={() => load(true)}
+            className="h-8 px-3 rounded-lg bg-slate-100 dark:bg-zinc-700 hover:bg-slate-200 dark:hover:bg-zinc-600 text-gray-600 dark:text-gray-300 text-xs flex items-center gap-1"
           >
-            刷新
+            <span className={`inline-block w-3 h-3 rounded-full border border-current ${refreshing ? 'animate-spin' : ''}`} style={{ borderTopColor: 'transparent' }} />
+            {refreshing ? '刷新中' : '刷新'}
           </button>
           <button
             onClick={handleCleanup}
