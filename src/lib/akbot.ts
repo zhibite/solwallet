@@ -18,6 +18,7 @@
  */
 
 import { getHelius } from './helius';
+import { getMultiRpc } from './multi-rpc';
 import type { HeliusEnhancedTx } from './types';
 
 /** AKBot 卖币合约地址（所有 akbot 用户 sell 都走这个 program） */
@@ -89,14 +90,17 @@ async function scanAddressForAkbotCore(
   if (!address || typeof address !== 'string' || address.length < 32) return null;
 
   const helius = getHelius();
+  const rpc = getMultiRpc();
   const pageSize = Math.min(opts.pageSize ?? 1000, 1000); // 上限保护
   const maxPages = Math.min(opts.maxPages ?? 5, 20);        // 上限保护（≤ 20000 sigs）
 
-  // 1) 分页拉签名（newest-first）
+  // 1) 分页拉签名（newest-first）—— 公开 RPC，走多源轮询省 Helius 配额
   const allSigs: Array<{ signature: string }> = [];
   let before: string | undefined;
   for (let i = 0; i < maxPages; i++) {
-    const batch = await helius.getSignaturesForAddress(address, { limit: pageSize, before });
+    // solana-web3.js 的 before 参数：list element 形状里 .signature 是字符串；
+    // 我们的多源 wrapper 走 Connection.getSignaturesForAddress(pk, { limit, before }) 即可。
+    const batch = await rpc.getSignaturesForAddress(address, pageSize);
     if (!batch || batch.length === 0) break;
     allSigs.push(...batch);
     if (batch.length < pageSize) break;

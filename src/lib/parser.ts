@@ -11,10 +11,24 @@
  * - version: 'v0' 表示地址表交易（含 ALT），'legacy' 表示传统交易
  */
 
-import { PublicKey, TransactionInstruction } from '@solana/web3.js';
+import { PublicKey, TransactionInstruction, TransactionResponse } from '@solana/web3.js';
 import type { HeliusEnhancedTx, SolanaBlock } from './types';
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
+
+/** Solana 标准 system program ID */
+const SYSTEM_PROGRAM_ID = '11111111111111111111111111111111';
+
+/** 已知 DEX 程序 ID → source 名称映射（取首个命中） */
+const PROGRAM_SOURCE_MAP: Record<string, string> = {
+  'pAMMBay6oceH9fJKBRHGP5D4bD4nWc6YfiMwT4w5SHf': 'RAYDIUM_CPMM',
+  '675kPX9MHTjS2zt1qfr1WiF9jrTeX7JXqGev3N1uR3kS': 'RAYDIUM',
+  '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P': 'PUMP_FUN',
+  'JUP6LgZ9JyH4xNz7n9P2xBCfA4rWXxW9gh6D6L6R4Vfq': 'JUPITER',
+  'JUP4Fb2aWiR2XApy9C7v3R4v6v1kM7k7b5F3H7w5QHDq': 'JUPITER',
+  'JUP5eah7fHkzu7tQHiCQLfB6y8L3c6Yz4rCKQEEYwmK7': 'JUPITER',
+  'whirLbMiicVdio4qvUfM5KAgmbLp4R9vCf8qMCH4bEd': 'ORCA',
+};
 
 export interface ParsedBuy {
   signature: string;
@@ -181,6 +195,10 @@ export function calcPriorityFee(tx: HeliusEnhancedTx): number {
 /** 是否为 bundled transaction（含 Address Lookup Table） */
 export function isBundled(tx: HeliusEnhancedTx): boolean {
   // v0 + 有 ALT 通常是 jito bundle
+  // HeliusEnhancedTx 不暴露 addressTableLookups 字段，但 fallback 适配器会写 _hasAlt
+  // (见 solanaTxToHeliusEnhanced)。有 _hasAlt=false 时强制 false（避免误判普通 v0）。
+  const hasAlt = (tx as any)._hasAlt as boolean | undefined;
+  if (hasAlt === false) return false;
   return tx.version === 0;
 }
 
@@ -247,30 +265,35 @@ export function parseBlockTxs(
       const postToken = meta.postTokenBalances ?? [];
       const preToken = meta.preTokenBalances ?? [];
 
-      // 找到 feePayer 的 token balance 变化
+      // 找到 feePayer 的 token balance 变化。用 (accountIndex, mint) 复合 key 防多个 mint 复用同一 ata 时的歧义。
+      const preMap = new Map<string, any>();
+      for (const p of preToken) preMap.set(`${p.accountIndex}-${p.mint}`, p);
+
       for (const post of postToken) {
         if (post.owner !== feePayer) continue;
         if (targetMint && post.mint !== targetMint) continue;
 
-        const pre = preToken.find((p) => p.accountIndex === post.accountIndex);
+        const pre = preMap.get(`${post.accountIndex}-${post.mint}`);
         const preAmount = pre ? Number(pre.uiTokenAmount.amount) : 0;
         const postAmount = Number(post.uiTokenAmount.amount);
         const delta = postAmount - preAmount;
 
         if (delta > 0) {
           const solOut = (preBal0 - postBal0) / LAMPORTS_PER_SOL;
+          const isVersioned = !!msg.addressTableLookups || !!msg.staticAccountKeys;
+          const hasAlt = isVersioned && Array.isArray(msg.addressTableLookups) && msg.addressTableLookups.length > 0;
           result.push({
             signature: sig,
-            slot: 0,
+            slot: 0, // block 上下文无 slot 信息，由调用方补
             blockTime: block.blockTime ?? 0,
             address: feePayer,
             mint: post.mint,
             buySol: solOut,
-            tipSol: 0,    // RPC fallback 难算 tip
-            prioLamports: (meta.fee ?? 0) - 5000,
+            tipSol: 0,    // RPC fallback 难算 tip（block context 没有 native transfers 精细计算）
+            prioLamports: Math.max(0, (meta.fee ?? 0) - 5000),
             fee: meta.fee ?? 0,
-            version: 'legacy',
-            isBundled: false,
+            version: isVersioned ? 'v0' : 'legacy',
+            isBundled: isVersioned && hasAlt,
             source: '',
             success: true,
             tokenAmount: delta,
@@ -284,4 +307,241 @@ export function parseBlockTxs(
     }
   }
   return result;
+}
+
+/**
+ * 把 Solana 标准 RPC 的 TransactionResponse 适配成 HeliusEnhancedTx 形状，
+ * 让 parseHeliusTx() 可以直接消费。这样 monitor / first-sniper 等下游代码
+ * 不用关心数据是来自 Helius Enhanced API 还是免费公共 RPC。
+ *
+ * 适配要点：
+ * - accountKeys: web3.js 的 message.staticAccountKeys(v0) 或 message.accountKeys(legacy)，
+ *   accounts index 指向这一组键
+ * - tokenTransfers: 从 meta.postTokenBalances - preTokenBalances 计算（owner = feePayer 时），
+ *   关注 feePayer 净收入（即买入的 token）
+ * - nativeTransfers: 解码 System Program::Transfer 指令（顶层 + innerInstructions），
+ *   标签 2(u32 LE) + 8 bytes lamports
+ * - instructions: 顶层 compiledInstructions 原文，accounts 索引展开为公钥
+ * - version: web3.js v1.95 在响应顶层带 version 字段；同时检测 message.addressTableLookups 兜底
+ *
+ * 不依赖 Helius Enhanced API，但能输出与 Helius 兼容的形状。
+ */
+export function solanaTxToHeliusEnhanced(
+  tx: TransactionResponse,
+): HeliusEnhancedTx | null {
+  try {
+    if (!tx || !tx.transaction) return null;
+    const t = tx.transaction as any;
+    const sig: string | undefined = t.signatures?.[0];
+    if (!sig) return null;
+
+    const message: any = t.message;
+    if (!message) return null;
+
+    // accountKeys: v0 用 staticAccountKeys，legacy 用 accountKeys
+    const rawKeys: any[] = (message.staticAccountKeys ?? message.accountKeys ?? []) as any[];
+    const accountKeys: string[] = rawKeys.map((k: any) =>
+      typeof k === 'string' ? k : (k?.toBase58?.() ?? String(k)),
+    );
+    if (accountKeys.length === 0) return null;
+    const feePayer = accountKeys[0];
+
+    const meta = tx.meta;
+    if (!meta) return null;
+
+    // version: 顶层 tx.version 是 web3.js v1.95+ 提供的，没有就检测 addressTableLookups
+    const topVersion = (tx as any).version;
+    const isVersioned =
+      topVersion === 0 ||
+      (typeof topVersion === 'string' && topVersion !== 'legacy') ||
+      Array.isArray(message.addressTableLookups);
+    const version: 'legacy' | 0 = isVersioned ? 0 : 'legacy';
+
+    // v0 是否有 ALT（Address Lookup Table）：影响 isBundled 判定。
+    // Solana 的 Jito bundle 入口强制用 ALT，普通 v0 tx（无 ALT）不算 bundle。
+    const hasAlt = isVersioned
+      ? Array.isArray(message.addressTableLookups) && message.addressTableLookups.length > 0
+      : false;
+
+    // ----- 1) tokenTransfers：feePayer 净收入 = 买入的 token -----
+    // 按 delta 倒序排（amount 大的在前），让 extractMint 的 find() 取到真正的 buy target。
+    // 否则 postTokenBalances 数组顺序里，deltasmall 的 mint 可能先出现，误选为 mint。
+    const tokenTransfers: NonNullable<HeliusEnhancedTx['tokenTransfers']> = [];
+    const pre = meta.preTokenBalances ?? [];
+    const post = meta.postTokenBalances ?? [];
+    const preMap = new Map<string, any>();
+    for (const p of pre) {
+      preMap.set(`${p.accountIndex}-${p.mint}`, p);
+    }
+    const inboundCandidates: Array<{ mint: string; delta: number; owner: string; toTokenAccount: string }> = [];
+    for (const po of post) {
+      const key = `${po.accountIndex}-${po.mint}`;
+      const preEntry = preMap.get(key);
+      const preAmt = preEntry ? Number(preEntry.uiTokenAmount?.amount ?? 0) : 0;
+      const postAmt = Number(po.uiTokenAmount?.amount ?? 0);
+      const delta = postAmt - preAmt;
+      if (delta <= 0) continue;
+      if (po.owner !== feePayer) continue; // 仅 feePayer 收入 = 买入 token
+      inboundCandidates.push({
+        mint: po.mint,
+        delta,
+        owner: po.owner,
+        toTokenAccount: accountKeys[po.accountIndex] ?? '',
+      });
+    }
+    // 倒序：amount 大的 mint 排在前，extractMint 会优先选它
+    inboundCandidates.sort((a, b) => b.delta - a.delta);
+    for (const c of inboundCandidates) {
+      tokenTransfers.push({
+        fromUserAccount: '', // 公共 RPC 不直接解 fromUserAccount（pool 合约的 ata）
+        toUserAccount: c.owner,
+        fromTokenAccount: '',
+        toTokenAccount: c.toTokenAccount,
+        tokenAmount: c.delta,
+        mint: c.mint,
+        tokenStandard: 'Fungible',
+      });
+    }
+
+    // ----- 2) nativeTransfers：解码顶层 + inner 的 System::Transfer -----
+    // web3.js v1.95 不一致：顶层 CompiledInstruction 用 accountKeyIndexes，inner 用 accounts
+    const nativeTransfers: NonNullable<HeliusEnhancedTx['nativeTransfers']> = [];
+    const collectSystemTransfers = (ixList: any[]) => {
+      for (const ix of ixList) {
+        if (!ix) continue;
+        let pidStr: string | undefined;
+        if (typeof ix.programId === 'string') {
+          pidStr = ix.programId;
+        } else if (ix.programId?.toBase58) {
+          pidStr = ix.programId.toBase58();
+        } else if (typeof ix.programIdIndex === 'number') {
+          pidStr = accountKeys[ix.programIdIndex];
+        }
+        if (pidStr !== SYSTEM_PROGRAM_ID) continue;
+        // 顶层(accountKeyIndexes) 或 inner(accounts)
+        const accounts: number[] = ix.accountKeyIndexes ?? ix.accounts ?? [];
+        if (accounts.length < 2) continue;
+        const rawData = ix.data;
+        const data = Buffer.isBuffer(rawData)
+          ? rawData
+          : Buffer.from(rawData ?? '', 'base64');
+        // System::Transfer: tag 2 (u32 LE) + lamports (u64 LE) = 12 bytes
+        if (data.length < 12) continue;
+        const tag = data.readUInt32LE(0);
+        if (tag !== 2) continue;
+        let lamports: number;
+        try {
+          lamports = Number(data.readBigUInt64LE(4));
+        } catch {
+          continue;
+        }
+        if (lamports <= 0) continue;
+        const fromKey = accountKeys[accounts[0]];
+        const toKey = accountKeys[accounts[1]];
+        if (!fromKey || !toKey) continue;
+        nativeTransfers.push({
+          fromUserAccount: fromKey,
+          toUserAccount: toKey,
+          amount: lamports,
+        });
+      }
+    };
+
+    // 顶层 compiledInstructions（顶层一定存在）
+    const topIxList = (message.compiledInstructions ?? message.instructions ?? []) as any[];
+    collectSystemTransfers(topIxList);
+
+    // inner instructions
+    if (Array.isArray(meta.innerInstructions)) {
+      for (const inner of meta.innerInstructions) {
+        collectSystemTransfers(inner.instructions ?? []);
+      }
+    }
+
+    // ----- 2.5) 兜底：余额差法 -----
+    // 有的 tx（如 Pump.fun v0 + ALT）System::Transfer 在 inner 里也被聚合掉、或 base64 解析失败，
+    // 此时 nativeTransfers 会少算 feePayer 出去的总 SOL。但 feePayer 的 preBal[0]-postBal[0]
+    // 一定是 SOL 净流出 = buy + tip + fee，单独合成一个伪 transfer 让 calcBuySol 能算 buySol。
+    // toUserAccount 留空，calcJitoTip 不会误识别（它只比对 8 个已知 tip account）。
+    // 扣 fee：preBal-postBal 含 fee，而 Helius 的 calcBuySol 累加的是 nativeTransfers 中的 SOL
+    // 转账（不含 fee，因为 fee 走 system program 的特定路径，不是 transfer 指令）。
+    const pre0 = meta.preBalances?.[0] ?? 0;
+    const post0 = meta.postBalances?.[0] ?? 0;
+    const solOut = pre0 - post0;
+    if (solOut > 0) {
+      const alreadyOut = nativeTransfers
+        .filter((t) => t.fromUserAccount === feePayer)
+        .reduce((s, t) => s + (typeof t.amount === 'string' ? Number(t.amount) : t.amount), 0);
+      const missing = solOut - alreadyOut - (meta.fee ?? 0);
+      if (missing > 0) {
+        nativeTransfers.push({
+          fromUserAccount: feePayer,
+          toUserAccount: '',
+          amount: missing,
+        });
+      }
+    }
+
+    // ----- 3) instructions：顶层 + inner 合并，accounts index 展开为公钥，programId 也展开 -----
+    // 为什么合并 inner：CalcPriorityFee/ComputeBudget 可能在 CPI 内（Blockworks PriorityFee program），
+    // 只看顶层会漏掉 prio fee。Helius Enhanced 的 instructions 实际是扁平化顶层 + inner 的所有指令。
+    const expandIx = (ix: any) => {
+      let pid = '';
+      if (typeof ix.programId === 'string') {
+        pid = ix.programId;
+      } else if (ix.programId?.toBase58) {
+        pid = ix.programId.toBase58();
+      } else if (typeof ix.programIdIndex === 'number') {
+        pid = accountKeys[ix.programIdIndex] ?? '';
+      }
+      const accts: number[] = ix.accountKeyIndexes ?? ix.accounts ?? [];
+      return {
+        programId: pid,
+        accounts: accts.map((a: number) => accountKeys[a] ?? ''),
+        data: ix.data ?? '',
+      };
+    };
+    const instructions: NonNullable<HeliusEnhancedTx['instructions']> = [
+      ...topIxList.map(expandIx),
+      ...((meta.innerInstructions ?? []).flatMap((inner: any) =>
+        (inner.instructions ?? []).map(expandIx),
+      )),
+    ];
+
+    // ----- 4) source：仅按顶层 programId 找首个已知 DEX（inner 里的 CPI 不算） -----
+    let source = '';
+    for (const raw of topIxList) {
+      let pid = '';
+      const idx = raw.programIdIndex;
+      if (typeof raw.programId === 'string') {
+        pid = raw.programId;
+      } else if (raw.programId?.toBase58) {
+        pid = raw.programId.toBase58();
+      } else if (typeof idx === 'number') {
+        pid = accountKeys[idx] ?? '';
+      }
+      if (pid && PROGRAM_SOURCE_MAP[pid]) {
+        source = PROGRAM_SOURCE_MAP[pid];
+        break;
+      }
+    }
+
+    return {
+      signature: sig,
+      slot: tx.slot,
+      blockTime: tx.blockTime ?? 0,
+      fee: meta.fee ?? 0,
+      feePayer,
+      version,
+      tokenTransfers,
+      nativeTransfers,
+      instructions,
+      source,
+      // 内部标记：fallback 是否观察到 Address Lookup Table，被 isBundled 读取
+      _hasAlt: hasAlt,
+    } as HeliusEnhancedTx & { _hasAlt: boolean };
+  } catch (err) {
+    console.warn('[solanaTxToHeliusEnhanced] failed:', (err as Error).message);
+    return null;
+  }
 }

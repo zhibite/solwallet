@@ -17,6 +17,8 @@
 
 import axios, { AxiosInstance } from 'axios';
 import type { HeliusEnhancedTx } from './types';
+import { solanaTxToHeliusEnhanced } from './parser';
+import { getMultiRpc } from './multi-rpc';
 
 const HELIUS_BASE = 'https://mainnet.helius-rpc.com';
 
@@ -61,6 +63,48 @@ export class HeliusClient {
   async parseTransaction(signature: string): Promise<HeliusEnhancedTx | null> {
     const list = await this.parseTransactions([signature]);
     return list[0] ?? null;
+  }
+
+  /**
+   * 带 fallback 的单笔交易解析
+   * 1) 先走 Helius Enhanced API（首选，解析最干净）
+   * 2) 失败 / 限流（429/503/5xx）/ 抛错 → 用 6 个公共 RPC 的 getTransaction 兜底，
+   *    通过 solanaTxToHeliusEnhanced 适配成 HeliusEnhancedTx 形状后返回
+   *
+   * 整体不再抛错（除非两边都炸），让上游如 monitor 的 try/catch 不会因 429 把整批 target 拖死
+   */
+  async parseTransactionWithFallback(signature: string): Promise<HeliusEnhancedTx | null> {
+    // 1) Helius Enhanced
+    try {
+      const r = await this.parseTransaction(signature);
+      if (r) return r;
+    } catch (err: any) {
+      const status = err?.response?.status ?? err?.status;
+      // 429/503/500/网络错误 全部进 fallback；其他（参数错误）直接返回 null
+      if (status && ![429, 500, 502, 503, 504].includes(status)) {
+        const msg = err?.message ?? String(err);
+        if (!/ENOTFOUND|ETIMEDOUT|ECONNRESET|network/i.test(msg)) {
+          return null;
+        }
+      }
+      // 否则静默进入 fallback
+    }
+    // 2) 公共 RPC fallback
+    try {
+      const tx = await getMultiRpc().getTransaction(signature);
+      if (!tx) return null;
+      const adapted = solanaTxToHeliusEnhanced(tx);
+      if (adapted) {
+        // 标记为 fallback 来源，方便上层日志/排障
+        (adapted as any)._source = 'rpc_fallback';
+      }
+      return adapted;
+    } catch (err) {
+      console.warn(
+        `[helius] fallback parseTransaction ${signature.slice(0, 12)}… failed: ${(err as Error).message}`,
+      );
+      return null;
+    }
   }
 
   /** 获取某地址的签名列表（支持 until 翻页） */

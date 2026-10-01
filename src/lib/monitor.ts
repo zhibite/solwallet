@@ -12,6 +12,7 @@
 
 import { query, queryOne, withTransaction } from './db';
 import { getHelius, isHeliusConfigured } from './helius';
+import { getMultiRpc } from './multi-rpc';
 import { parseHeliusTx } from './parser';
 import { saveBlockAnalysis } from './first-sniper';
 import { quickAkbotCheck } from './akbot';
@@ -76,7 +77,10 @@ function scheduleNextPoll() {
 
 /** 轮询所有 active 目标 */
 async function pollAllTargets() {
+  // 签名列表是公开 RPC，走多源轮询降 Helius 配额消耗；
+  // 解析（parseTransaction）只能走 Helius Enhanced API，保留
   const helius = getHelius();
+  const rpc = getMultiRpc();
   const targets = await query<any>(`
     SELECT id, address, threshold_sol, last_buy_at
     FROM monitored_targets
@@ -85,9 +89,11 @@ async function pollAllTargets() {
 
   for (const t of targets) {
     try {
-      const sigs = await helius.getSignaturesForAddress(t.address, { limit: 20 });
+      const sigs = await rpc.getSignaturesForAddress(t.address, 20);
       let recordedCount = 0; // 本轮实际入 buy 的数量
       let recordedBlockTime: number | null = null; // 最近一笔被记录的 buy 的 blockTime
+      // 整批解析遇 429（Helius 配额打满）→ 短退避一次，避免雪崩重试
+      let parseBackoffMs = 0;
       for (const s of sigs) {
         if (s.err) continue;
         // 已存在则跳过
@@ -97,8 +103,28 @@ async function pollAllTargets() {
         );
         if (existing) continue;
 
-        // 解析 + 阈值过滤
-        const tx = await helius.parseTransaction(s.signature);
+        // 单 sig 解析失败（429/网络）→ 跳过这一个,继续下一个。
+        // 这条把"Helius 限流 → 整个 target poll 瘫痪"修掉,只丢当批未解析的 sigs,
+        // 下次轮询 (默认 15s) 会再扫到同一批未入库的 sigs,DB 主键去重保证不重复入库。
+        // parseTransactionWithFallback: Helius Enhanced 优先,失败/限流时自动
+        // 回退到 6 个公共 RPC + 自适配 parser,Helius 被打满也不会丢解析能力。
+        let tx: Awaited<ReturnType<typeof helius.parseTransactionWithFallback>> = null;
+        try {
+          if (parseBackoffMs > 0) await new Promise((r) => setTimeout(r, parseBackoffMs));
+          tx = await helius.parseTransactionWithFallback(s.signature);
+          parseBackoffMs = 0;
+        } catch (perr: any) {
+          const status = perr?.response?.status ?? perr?.status;
+          if (status === 429) {
+            // 整批打满 → 退避 8s,本批剩余 sigs 全部跳过
+            parseBackoffMs = 8_000;
+            console.warn(`[monitor] Helius 429 on target ${t.address.slice(0, 8)}… — skip remaining ${sigs.length - sigs.indexOf(s) - 1} sigs, retry next poll`);
+            break;
+          }
+          // 其它错误（5xx/网络）→ 跳过这一个继续
+          console.warn(`[monitor] parseTransaction ${s.signature.slice(0, 12)}… failed: ${perr?.message ?? perr}`);
+          continue;
+        }
         if (!tx) continue;
         const buy = parseHeliusTx(tx);
         if (!buy) continue;

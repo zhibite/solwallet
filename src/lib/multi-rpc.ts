@@ -1,8 +1,8 @@
 /**
- * 多免费 RPC 源轮询客户端
+ * 多免费/低配额 RPC 源轮询客户端
  * 策略：
  * 1) 健康检查：定期探测，自动剔除失败的端点
- * 2) 权重轮询：根据历史成功率分配请求权重
+ * 2) 严格 round-robin 轮询：每个端点均匀轮流使用，避免免费 RPC 限额/限流
  * 3) 速率限制：每个端点独立的令牌桶
  * 4) 熔断器：连续失败 N 次暂停该端点 X 秒
  * 5) Redis 缓存：相同 slot/signature 的请求短时间合并
@@ -29,6 +29,7 @@ export class MultiFreeRpc {
   private buckets = new Map<string, { tokens: number; lastRefill: number }>();
   private pendingRequests = new Map<string, Promise<any>>();
   private healthCheckTimer: NodeJS.Timeout | null = null;
+  private rrIndex = 0; // 下一个待选端点的起始索引（round-robin）
 
   constructor(urls: string[] = MultiFreeRpc.defaultEndpoints()) {
     this.endpoints = urls.map((url) => ({
@@ -55,22 +56,22 @@ export class MultiFreeRpc {
     ];
   }
 
-  /** 选一个可用端点（按权重，熔断中的跳过） */
+  /** 选一个可用端点（严格 round-robin，熔断中的跳过） */
   private pick(): RpcEndpoint | null {
     const now = Date.now();
-    const available = this.endpoints.filter((e) => e.circuitOpenUntil < now);
-    if (available.length === 0) {
-      // 全部熔断中，挑失败最少的
-      return this.endpoints.sort((a, b) => a.fails - b.fails)[0] ?? null;
+    const n = this.endpoints.length;
+    // 绕一整圈，跳过熔断中的，找到下一个可用端点
+    for (let i = 0; i < n; i++) {
+      const idx = (this.rrIndex + i) % n;
+      const ep = this.endpoints[idx];
+      if (ep.circuitOpenUntil < now) {
+        // 下次从下一个开始，确保均匀轮询
+        this.rrIndex = (idx + 1) % n;
+        return ep;
+      }
     }
-    // 加权随机
-    const totalWeight = available.reduce((s, e) => s + e.weight, 0);
-    let r = Math.random() * totalWeight;
-    for (const e of available) {
-      r -= e.weight;
-      if (r <= 0) return e;
-    }
-    return available[0];
+    // 全部熔断中，挑失败最少的兜底
+    return this.endpoints.sort((a, b) => a.fails - b.fails)[0] ?? null;
   }
 
   /** 令牌桶：每个端点限速 */
@@ -272,9 +273,20 @@ export class MultiFreeRpc {
 }
 
 let _instance: MultiFreeRpc | null = null;
+
+function loadRpcEndpoints(): string[] {
+  const urls: string[] = [];
+  for (let i = 1; ; i++) {
+    const val = process.env[`SOLANA_RPC_${i}`];
+    if (val === undefined || val.trim() === '') break;
+    urls.push(val.trim());
+  }
+  return urls.length > 0 ? urls : MultiFreeRpc.defaultEndpoints();
+}
+
 export function getMultiRpc(): MultiFreeRpc {
   if (!_instance) {
-    const urls = (process.env.SOLANA_RPCS ?? MultiFreeRpc.defaultEndpoints().join(',')).split(',').map((s) => s.trim()).filter(Boolean);
+    const urls = loadRpcEndpoints();
     _instance = new MultiFreeRpc(urls);
   }
   return _instance;

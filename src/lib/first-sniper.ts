@@ -56,7 +56,8 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
   let targetBuy = await fetchBuyBySig(targetSig);
   if (!targetBuy) {
     try {
-      const enhanced = await helius.parseTransaction(targetSig);
+      // 走 Helius Enhanced → 公共 RPC 的 fallback，避免 Helius 限流时拿不到目标 tx
+      const enhanced = await helius.parseTransactionWithFallback(targetSig);
       if (enhanced) {
         targetBuy = parseHeliusTx(enhanced);
       }
