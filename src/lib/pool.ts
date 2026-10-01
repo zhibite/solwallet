@@ -466,6 +466,40 @@ export async function runBFS(opts: {
 }
 
 /**
+ * 数 pool_members（同 listPoolMembers 的 WHERE 条件，用于前端分页 total）
+ */
+export async function countPoolMembers(opts: {
+  role?: string;
+  promoted?: boolean;
+  minFreq?: number;
+  isAkbot?: boolean;
+} = {}): Promise<number> {
+  const conditions: string[] = ['1=1'];
+  const params: any[] = [];
+  if (opts.role) {
+    params.push(opts.role);
+    conditions.push(`role = $${params.length}`);
+  }
+  if (opts.promoted !== undefined) {
+    params.push(opts.promoted);
+    conditions.push(`promoted_to_target = $${params.length}`);
+  }
+  if (opts.minFreq !== undefined) {
+    params.push(opts.minFreq);
+    conditions.push(`freq >= $${params.length}`);
+  }
+  if (opts.isAkbot !== undefined) {
+    params.push(opts.isAkbot);
+    conditions.push(`is_akbot = $${params.length}`);
+  }
+  const row = await queryOne<{ c: string }>(
+    `SELECT COUNT(*)::text AS c FROM pool_members WHERE ${conditions.join(' AND ')}`,
+    params,
+  );
+  return parseInt(row?.c ?? '0', 10);
+}
+
+/**
  * 列出 pool_members
  */
 export async function listPoolMembers(opts: {

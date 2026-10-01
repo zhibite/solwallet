@@ -4,7 +4,7 @@
  * POST - 手动添加一个地址到池子
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { listPoolMembers, addPoolMember, getPoolStats } from '@/lib/pool';
+import { listPoolMembers, addPoolMember, countPoolMembers, getPoolStats } from '@/lib/pool';
 
 export async function GET(req: NextRequest) {
   try {
@@ -17,7 +17,7 @@ export async function GET(req: NextRequest) {
     const limit = parseInt(searchParams.get('limit') ?? '100', 10);
     const offset = parseInt(searchParams.get('offset') ?? '0', 10);
 
-    const [members, stats] = await Promise.all([
+    const [members, total, stats] = await Promise.all([
       listPoolMembers({
         role,
         promoted: promoted === 'true' ? true : promoted === 'false' ? false : undefined,
@@ -27,10 +27,16 @@ export async function GET(req: NextRequest) {
         offset,
         limit,
       }),
+      countPoolMembers({
+        role,
+        promoted: promoted === 'true' ? true : promoted === 'false' ? false : undefined,
+        minFreq: minFreq ? parseInt(minFreq, 10) : undefined,
+        isAkbot: isAkbot === 'true' ? true : isAkbot === 'false' ? false : undefined,
+      }),
       getPoolStats(),
     ]);
 
-    return NextResponse.json({ ok: true, data: { members, stats } });
+    return NextResponse.json({ ok: true, data: { members, total, stats } });
   } catch (err: any) {
     return NextResponse.json({ ok: false, error: err.message }, { status: 500 });
   }

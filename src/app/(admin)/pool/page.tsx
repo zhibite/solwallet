@@ -39,9 +39,13 @@ interface Stats {
   bfsLastRun: string | null;
 }
 
+const PAGE_SIZE = 30;
+
 export default function PoolPage() {
   const [members, setMembers] = useState<PoolMember[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [sortBy, setSortBy] = useState<'freq' | 'score' | 'seen'>('freq');
   const [roleFilter, setRoleFilter] = useState<'all' | 'first_sniper' | 'follower'>('all');
@@ -51,7 +55,11 @@ export default function PoolPage() {
   const load = async () => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ sort: sortBy });
+      const params = new URLSearchParams({
+        sort: sortBy,
+        limit: String(PAGE_SIZE),
+        offset: String((page - 1) * PAGE_SIZE),
+      });
       if (roleFilter !== 'all') params.set('role', roleFilter);
       if (akbotFilter === 'akbot') params.set('akbot', 'true');
       if (akbotFilter === 'normal') params.set('akbot', 'false');
@@ -59,6 +67,7 @@ export default function PoolPage() {
       const json = await res.json();
       if (json.ok) {
         setMembers(json.data.members);
+        setTotal(json.data.total ?? 0);
         setStats(json.data.stats);
       }
     } finally {
@@ -66,7 +75,20 @@ export default function PoolPage() {
     }
   };
 
-  useEffect(() => { load(); }, [sortBy, roleFilter, akbotFilter]);
+  useEffect(() => { load(); }, [sortBy, roleFilter, akbotFilter, page]);
+
+  // filter / sort 变化时回到第 1 页
+  useEffect(() => { setPage(1); }, [sortBy, roleFilter, akbotFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  // 翻页后滚到表格顶部（避免翻页后用户还在表格底部）
+  useEffect(() => {
+    if (!loading) {
+      const el = document.getElementById('pool-table-top');
+      el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [page, loading]);
 
   const triggerBFS = async () => {
     setBfsBusy(true);
@@ -180,8 +202,12 @@ export default function PoolPage() {
             </button>
           ))}
         </div>
-        <span className="text-xs text-gray-400">共 {members.length} 条</span>
+        <span className="text-xs text-gray-400">
+          共 {total} 条，第 {page} / {totalPages} 页
+        </span>
       </div>
+
+      <div id="pool-table-top" />
 
       {/* 列表 */}
       <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
@@ -268,7 +294,80 @@ export default function PoolPage() {
             </tbody>
           </table>
         </div>
+
+        {/* 分页 */}
+        {totalPages > 1 && (
+          <Pagination
+            page={page}
+            totalPages={totalPages}
+            onChange={setPage}
+          />
+        )}
       </div>
+    </div>
+  );
+}
+
+function Pagination({
+  page,
+  totalPages,
+  onChange,
+}: {
+  page: number;
+  totalPages: number;
+  onChange: (p: number) => void;
+}) {
+  // 简化页码条：当前页前后各 2 页 + 首尾
+  const visible = new Set<number>([1, totalPages, page - 2, page - 1, page, page + 1, page + 2]);
+  const list = [...visible].filter((p) => p >= 1 && p <= totalPages).sort((a, b) => a - b);
+  const pages: (number | '…')[] = [];
+  for (let i = 0; i < list.length; i++) {
+    if (i > 0 && list[i] - list[i - 1] > 1) pages.push('…');
+    pages.push(list[i]);
+  }
+
+  const btnBase =
+    'h-8 min-w-[2rem] px-2 inline-flex items-center justify-center rounded-lg text-xs font-medium border transition-colors';
+  const btnIdle =
+    'bg-white dark:bg-zinc-800 text-gray-700 dark:text-gray-300 border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-zinc-700';
+  const btnActive =
+    'bg-brand-500 text-white border-brand-500';
+  const btnDisabled =
+    'bg-white dark:bg-zinc-800 text-gray-300 dark:text-gray-600 border-gray-200 dark:border-gray-700 cursor-not-allowed';
+
+  return (
+    <div className="flex items-center justify-between px-3 py-3 border-t border-gray-200 dark:border-gray-700 text-sm">
+      <button
+        onClick={() => onChange(Math.max(1, page - 1))}
+        disabled={page <= 1}
+        className={`${btnBase} ${page <= 1 ? btnDisabled : btnIdle}`}
+      >
+        ← 上一页
+      </button>
+
+      <div className="flex items-center gap-1">
+        {pages.map((p, i) =>
+          p === '…' ? (
+            <span key={`e${i}`} className="px-1 text-gray-400 text-xs">…</span>
+          ) : (
+            <button
+              key={p}
+              onClick={() => onChange(p)}
+              className={`${btnBase} ${p === page ? btnActive : btnIdle}`}
+            >
+              {p}
+            </button>
+          ),
+        )}
+      </div>
+
+      <button
+        onClick={() => onChange(Math.min(totalPages, page + 1))}
+        disabled={page >= totalPages}
+        className={`${btnBase} ${page >= totalPages ? btnDisabled : btnIdle}`}
+      >
+        下一页 →
+      </button>
     </div>
   );
 }
