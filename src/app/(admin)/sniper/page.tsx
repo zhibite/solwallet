@@ -2,6 +2,7 @@
 import React, { useEffect, useState } from "react";
 import AddressCopy from "@/components/common/AddressCopy";
 import SolAmount from "@/components/common/SolAmount";
+import PrioSolAmount from "@/components/common/PrioSolAmount";
 import RelativeTime from "@/components/common/RelativeTime";
 
 interface Row {
@@ -12,6 +13,7 @@ interface Row {
   win_rate: string | null;
   total_buy: string;
   total_tip: string;
+  total_prio: string;
   avg_offset: string | null;
   total_pnl: string | null;
   avg_pnl: string | null;
@@ -26,20 +28,44 @@ const SORTS = [
 ] as const;
 type SortId = typeof SORTS[number]['id'];
 
+const PAGE_SIZE = 30;
+
 export default function SniperRankingPage() {
   const [rows, setRows] = useState<Row[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [days, setDays] = useState(30);
   const [sort, setSort] = useState<SortId>('count');
+  const [page, setPage] = useState(1);
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   useEffect(() => {
     setLoading(true);
     const from = new Date(Date.now() - 86400_000 * days).toISOString();
-    fetch(`/api/sniper-ranking?from=${from}&limit=100&sort=${sort}`)
+    const offset = (page - 1) * PAGE_SIZE;
+    fetch(`/api/sniper-ranking?from=${from}&limit=${PAGE_SIZE}&offset=${offset}&sort=${sort}`)
       .then((r) => r.json())
-      .then((j) => { if (j.ok) setRows(j.data); })
+      .then((j) => {
+        if (j.ok) {
+          setRows(j.data);
+          setTotal(j.total ?? 0);
+        }
+      })
       .finally(() => setLoading(false));
-  }, [days, sort]);
+  }, [days, sort, page]);
+
+  // 切换 days/sort 后回到第 1 页
+  const handleDaysChange = (v: number) => { setDays(v); setPage(1); };
+  const handleSortChange = (v: SortId) => { setSort(v); setPage(1); };
+
+  // 当 total 缩小，避免 page 超出范围
+  useEffect(() => {
+    if (page > totalPages) setPage(1);
+  }, [totalPages, page]);
+
+  const start = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
+  const end = Math.min(page * PAGE_SIZE, total);
 
   return (
     <div className="space-y-4">
@@ -55,7 +81,7 @@ export default function SniperRankingPage() {
             <span className="text-xs text-gray-500 dark:text-gray-400">时间范围</span>
             <select
               value={days}
-              onChange={(e) => setDays(parseInt(e.target.value, 10))}
+              onChange={(e) => handleDaysChange(parseInt(e.target.value, 10))}
               className="h-9 px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-zinc-700 text-sm text-gray-800 dark:text-white/90 focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <option value={7}>最近 7 天</option>
@@ -67,7 +93,7 @@ export default function SniperRankingPage() {
             <span className="text-xs text-gray-500 dark:text-gray-400">排序</span>
             <select
               value={sort}
-              onChange={(e) => setSort(e.target.value as SortId)}
+              onChange={(e) => handleSortChange(e.target.value as SortId)}
               className="h-9 px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-zinc-700 text-sm text-gray-800 dark:text-white/90 focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               {SORTS.map((s) => (
@@ -90,6 +116,7 @@ export default function SniperRankingPage() {
                 <th className="px-3 py-2 text-right">胜率</th>
                 <th className="px-3 py-2 text-right">总买入 SOL</th>
                 <th className="px-3 py-2 text-right">总 TIP</th>
+                <th className="px-3 py-2 text-right">总优先费</th>
                 <th className="px-3 py-2 text-right">平均偏移</th>
                 <th className="px-3 py-2 text-right">总 PnL</th>
                 <th className="px-3 py-2 text-right">平均 PnL</th>
@@ -98,9 +125,9 @@ export default function SniperRankingPage() {
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={11} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">加载中...</td></tr>
+                <tr><td colSpan={12} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">加载中...</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={11} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">暂无狙击数据。需要先有 block 级分析记录</td></tr>
+                <tr><td colSpan={12} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">暂无狙击数据。需要先有 block 级分析记录</td></tr>
               ) : (
                 rows.map((r, idx) => {
                   const winRate = r.win_rate ? parseFloat(r.win_rate) : 0;
@@ -114,7 +141,7 @@ export default function SniperRankingPage() {
                         : 'text-gray-500 dark:text-gray-400';
                   return (
                     <tr key={r.address} className="border-b border-gray-100 dark:border-gray-700/50 hover:bg-gray-50 dark:hover:bg-zinc-700/30">
-                      <td className="px-3 py-2 text-center font-mono text-xs text-gray-500 dark:text-gray-400">{idx + 1}</td>
+                      <td className="px-3 py-2 text-center font-mono text-xs text-gray-500 dark:text-gray-400">{(page - 1) * PAGE_SIZE + idx + 1}</td>
                       <td className="px-3 py-2"><AddressCopy address={r.address} length={6} /></td>
                       <td className="px-3 py-2 text-right font-mono text-gray-800 dark:text-white/90">{r.snipe_count}</td>
                       <td className="px-3 py-2 text-right font-mono text-gray-600 dark:text-gray-300">{r.mint_count}</td>
@@ -128,6 +155,7 @@ export default function SniperRankingPage() {
                       </td>
                       <td className="px-3 py-2 text-right"><SolAmount value={r.total_buy} /></td>
                       <td className="px-3 py-2 text-right"><SolAmount value={r.total_tip} /></td>
+                      <td className="px-3 py-2 text-right"><PrioSolAmount value={r.total_prio} /></td>
                       <td className={`px-3 py-2 text-right font-mono ${offsetColor}`}>
                         {avgOffset === null
                           ? '-'
@@ -142,6 +170,51 @@ export default function SniperRankingPage() {
               )}
             </tbody>
           </table>
+        </div>
+
+        {/* 分页 */}
+        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-t border-gray-200 dark:border-gray-700 text-sm">
+          <div className="text-xs text-gray-500 dark:text-gray-400">
+            {total === 0
+              ? '共 0 条'
+              : `第 ${start}–${end} 条 / 共 ${total} 条`}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={page <= 1 || loading}
+              className="h-8 px-3 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-zinc-800 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-white/[0.03] disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              上一页
+            </button>
+            <span className="text-xs text-gray-600 dark:text-gray-400 font-mono">
+              {page} / {totalPages}
+            </span>
+            <button
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              disabled={page >= totalPages || loading}
+              className="h-8 px-3 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-zinc-800 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-white/[0.03] disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              下一页
+            </button>
+            <div className="flex items-center gap-1 ml-2">
+              <span className="text-xs text-gray-500 dark:text-gray-400">跳至</span>
+              <input
+                type="number"
+                min={1}
+                max={totalPages}
+                value={page}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value, 10);
+                  if (Number.isFinite(v)) {
+                    setPage(Math.min(totalPages, Math.max(1, v)));
+                  }
+                }}
+                className="w-14 h-8 px-2 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-zinc-800 text-center text-gray-800 dark:text-white/90 font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <span className="text-xs text-gray-500 dark:text-gray-400">页</span>
+            </div>
+          </div>
         </div>
       </div>
     </div>

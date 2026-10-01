@@ -215,6 +215,7 @@ export default function PoolPage() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 dark:bg-zinc-800/50 text-xs text-gray-500 dark:text-gray-400">
               <tr>
+                <th className="px-3 py-2 text-center font-medium">#</th>
                 <th className="px-3 py-2 text-left font-medium">地址</th>
                 <th className="px-3 py-2 text-center font-medium">角色</th>
                 <th className="px-3 py-2 text-center font-medium">出现次数</th>
@@ -230,12 +231,13 @@ export default function PoolPage() {
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={11} className="px-3 py-6 text-center text-gray-500">加载中...</td></tr>
+                <tr><td colSpan={12} className="px-3 py-6 text-center text-gray-500">加载中...</td></tr>
               ) : members.length === 0 ? (
-                <tr><td colSpan={11} className="px-3 py-6 text-center text-gray-500">池子为空 — 等待监控目标产生 buy 后自动归池</td></tr>
+                <tr><td colSpan={12} className="px-3 py-6 text-center text-gray-500">池子为空 — 等待监控目标产生 buy 后自动归池</td></tr>
               ) : (
-                members.map((m) => (
+                members.map((m, idx) => (
                   <tr key={m.id} className="border-b border-gray-100 dark:border-gray-700/50 hover:bg-gray-50 dark:hover:bg-zinc-700/30">
+                    <td className="px-3 py-2 text-center font-mono text-xs text-gray-500 dark:text-gray-400">{(page - 1) * PAGE_SIZE + idx + 1}</td>
                     <td className="px-3 py-2">
                       <div className="flex items-center gap-1.5">
                         <Link href={`/pool/${m.address}`} className="hover:text-brand-500">
