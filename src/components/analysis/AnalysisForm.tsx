@@ -5,6 +5,7 @@ import SolAmount from "@/components/common/SolAmount";
 import PrioSolAmount from "@/components/common/PrioSolAmount";
 import RelativeTime from "@/components/common/RelativeTime";
 import { CheckLineIcon, CloseLineIcon } from "@/icons";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 interface Trade {
   signature: string;
@@ -12,8 +13,12 @@ interface Trade {
   blockTime: number;
   mint: string;
   sol: number;
-  pnl: number;
-  status: 'confirmed' | 'pending' | 'failed';
+  /** 单笔跟单收益；持仓中为 null（还没卖，收益未实现） */
+  pnl: number | null;
+  tokenAmount: number;
+  status: 'closed' | 'partial' | 'open' | 'buy_failed';
+  /** 这笔买入的 token 已卖出比例 0~1 */
+  soldRatio: number;
   version: string;
   tip: number;
   prio: number;
@@ -25,13 +30,17 @@ interface Trade {
 }
 
 interface AnalysisResult {
-  totalPnl: number;
+  /** 已实现跟单收益合计（持仓中的买入不计入） */
+  realizedPnl: number;
+  /** 窗口内失败交易的手续费，不并入 realizedPnl */
   failedFee: number;
-  netPnl: number;
   buyCount: number;
-  failed: number;
-  confirmed: number;
-  pending: number;
+  closedCount: number;
+  openCount: number;
+  /** 部分平仓；前端「已平仓」标签含它 */
+  partialCount: number;
+  /** 买入失败；前端「持仓中」标签含它 */
+  buyFailedCount: number;
   trades: Trade[];
 }
 
@@ -49,9 +58,10 @@ export default function AnalysisForm() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<'all' | 'confirmed' | 'failed'>('all');
+  const [filter, setFilter] = useState<'all' | 'closed' | 'open'>('all');
   const [page, setPage] = useState(1);
   const [confirming, setConfirming] = useState(false);
+  const { alert } = useConfirm();
 
   const analyze = async () => {
     if (!address || address.length < 32) {
@@ -90,7 +100,7 @@ export default function AnalysisForm() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ address, source: 'analyze' }),
       });
-      alert('已加入跟单库');
+      await alert({ title: '已加入跟单库', description: `${address} 已确认`, variant: 'success' });
     } finally {
       setConfirming(false);
     }
@@ -110,21 +120,23 @@ export default function AnalysisForm() {
   const extraStats = useMemo(() => {
     if (!result) return null;
     const trades = result.trades;
-    const wins = trades.filter((t) => t.pnl > 0).length;
-    const losses = trades.filter((t) => t.pnl < 0).length;
-    const settled = wins + losses; // 已结案（不含 pending）
+    // pnl 为 null = 持仓中，收益未实现，不进胜率
+    const wins = trades.filter((t) => (t.pnl ?? 0) > 0).length;
+    const losses = trades.filter((t) => (t.pnl ?? 0) < 0).length;
+    const settled = wins + losses; // 已结案（不含持仓中）
     const winRate = settled > 0 ? (wins / settled) * 100 : 0;
-    const coverageRate = result.buyCount > 0 ? (wins / result.buyCount) * 100 : 0;
-    const maxWin = trades.reduce((m, t) => (t.pnl > m ? t.pnl : m), 0);
-    const maxLoss = trades.reduce((m, t) => (t.pnl < m ? t.pnl : m), 0);
+    const coverageRate = result.buyCount > 0 ? (settled / result.buyCount) * 100 : 0;
+    const pnls = trades.map((t) => t.pnl).filter((p): p is number => p != null);
+    const maxWin = pnls.reduce((m, p) => (p > m ? p : m), 0);
+    const maxLoss = pnls.reduce((m, p) => (p < m ? p : m), 0);
     return { winRate, coverageRate, maxWin, maxLoss };
   }, [result]);
 
   const filteredTrades = useMemo(() => {
     return result?.trades.filter((t) => {
       if (filter === 'all') return true;
-      if (filter === 'confirmed') return t.status === 'confirmed';
-      if (filter === 'failed') return t.status === 'failed';
+      if (filter === 'closed') return t.status === 'closed' || t.status === 'partial';
+      if (filter === 'open') return t.status === 'open' || t.status === 'buy_failed';
       return true;
     }) ?? [];
   }, [result?.trades, filter]);
@@ -190,30 +202,29 @@ export default function AnalysisForm() {
       {result && (
         <>
           {/* 统计卡片 - 第一行：核心数据 */}
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
-            <StatCard label="总 PnL (SOL)" value={<SolAmount value={result.totalPnl} signed />} tone="brand" />
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+            <StatCard
+              label="已实现跟单收益 (SOL)"
+              value={<SolAmount value={result.realizedPnl} signed />}
+              tone={result.realizedPnl >= 0 ? 'success' : 'danger'}
+            />
+            <StatCard
+              label="平仓率"
+              value={`${result.buyCount > 0 ? ((result.closedCount / result.buyCount) * 100).toFixed(0) : '0'}%`}
+              tone="default"
+            />
+            <StatCard label="买入笔数" value={result.buyCount} />
+            <StatCard
+              label="已平仓"
+              value={<span className="text-success-500">{result.closedCount}</span>}
+              tone={result.closedCount > 0 ? 'success' : 'default'}
+            />
+            <StatCard
+              label="持仓中"
+              value={<span className={result.openCount > 0 ? 'text-warning-500' : undefined}>{result.openCount}</span>}
+              tone={result.openCount > 0 ? 'danger' : 'default'}
+            />
             <StatCard label="失败手续费 (SOL)" value={<SolAmount value={result.failedFee} />} tone="danger" />
-            <StatCard
-              label="净 PnL (SOL)"
-              value={<SolAmount value={result.netPnl} signed />}
-              tone={result.netPnl >= 0 ? 'success' : 'danger'}
-            />
-            <StatCard label="Buy 数量" value={result.buyCount} />
-            <StatCard
-              label="失败"
-              value={<span className={result.failed > 0 ? 'text-error-500' : undefined}>{result.failed}</span>}
-              tone={result.failed > 0 ? 'danger' : 'default'}
-            />
-            <StatCard
-              label="已确认"
-              value={<span className="text-success-500">{result.confirmed}</span>}
-              tone={result.confirmed > 0 ? 'success' : 'default'}
-            />
-            <StatCard
-              label="未确认"
-              value={<span className={result.pending > 0 ? 'text-error-500' : undefined}>{result.pending}</span>}
-              tone={result.pending > 0 ? 'danger' : 'default'}
-            />
           </div>
 
           {/* 统计卡片 - 第二行：衍生指标 */}
@@ -225,7 +236,7 @@ export default function AnalysisForm() {
                 tone={extraStats.winRate >= 60 ? 'success' : extraStats.winRate < 40 ? 'danger' : 'default'}
               />
               <StatCard
-                label="包赚钱率"
+                label="结案率"
                 value={`${extraStats.coverageRate.toFixed(1)}%`}
                 tone={extraStats.coverageRate >= 60 ? 'success' : extraStats.coverageRate < 40 ? 'danger' : 'default'}
               />
@@ -272,20 +283,20 @@ export default function AnalysisForm() {
                   全部 ({result.trades.length})
                 </button>
                 <button
-                  onClick={() => { setFilter('confirmed'); setPage(1); }}
+                  onClick={() => { setFilter('closed'); setPage(1); }}
                   className={`px-3 py-1 rounded-xl text-xs ${
-                    filter === 'confirmed' ? 'bg-success-500 text-white' : 'bg-slate-100 dark:bg-zinc-700 text-gray-500 dark:text-gray-400 hover:bg-slate-200 dark:hover:bg-zinc-600'
+                    filter === 'closed' ? 'bg-success-500 text-white' : 'bg-slate-100 dark:bg-zinc-700 text-gray-500 dark:text-gray-400 hover:bg-slate-200 dark:hover:bg-zinc-600'
                   }`}
                 >
-                  只看成功 ({result.confirmed})
+                  已平仓 ({result.closedCount + result.partialCount})
                 </button>
                 <button
-                  onClick={() => { setFilter('failed'); setPage(1); }}
+                  onClick={() => { setFilter('open'); setPage(1); }}
                   className={`px-3 py-1 rounded-xl text-xs ${
-                    filter === 'failed' ? 'bg-error-500 text-white' : 'bg-slate-100 dark:bg-zinc-700 text-gray-500 dark:text-gray-400 hover:bg-slate-200 dark:hover:bg-zinc-600'
+                    filter === 'open' ? 'bg-warning-500 text-white' : 'bg-slate-100 dark:bg-zinc-700 text-gray-500 dark:text-gray-400 hover:bg-slate-200 dark:hover:bg-zinc-600'
                   }`}
                 >
-                  只看失败 ({result.failed})
+                  持仓中 ({result.openCount + result.buyFailedCount})
                 </button>
               </div>
               <span className="text-xs text-gray-500 dark:text-gray-400">
@@ -318,7 +329,13 @@ export default function AnalysisForm() {
                         <td className="px-3 py-2 font-mono text-xs text-gray-500 dark:text-gray-400">{t.slot}</td>
                         <td className="px-3 py-2"><AddressCopy address={t.mint} length={4} /></td>
                         <td className="px-3 py-2 text-right"><SolAmount value={t.sol} /></td>
-                        <td className="px-3 py-2 text-right"><SolAmount value={t.pnl} signed /></td>
+                        <td className="px-3 py-2 text-right">
+                          {t.pnl == null ? (
+                            <span className="font-mono text-xs text-warning-500">未实现</span>
+                          ) : (
+                            <SolAmount value={t.pnl} signed />
+                          )}
+                        </td>
                         <td className="px-3 py-2 text-right"><SolAmount value={t.tip} /></td>
                         <td className="px-3 py-2 text-right"><PrioSolAmount value={t.prio} /></td>
                         <td className="px-3 py-2">
@@ -332,12 +349,14 @@ export default function AnalysisForm() {
                           </a>
                         </td>
                         <td className="px-3 py-2 text-center">
-                          {t.status === 'confirmed' ? (
+                          {t.status === 'closed' ? (
                             <CheckLineIcon className="w-4 h-4 text-success-500 inline" />
-                          ) : t.status === 'failed' ? (
+                          ) : t.status === 'partial' ? (
+                            <span className="text-xs text-brand-500">部分平仓 {(t.soldRatio * 100).toFixed(0)}%</span>
+                          ) : t.status === 'buy_failed' ? (
                             <CloseLineIcon className="w-4 h-4 text-error-500 inline" />
                           ) : (
-                            <span className="text-xs text-gray-400">pending</span>
+                            <span className="text-xs text-warning-500">持仓中</span>
                           )}
                         </td>
                         <td className="px-3 py-2">

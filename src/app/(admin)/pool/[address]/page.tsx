@@ -5,6 +5,7 @@ import AddressCopy from "@/components/common/AddressCopy";
 import SolAmount from "@/components/common/SolAmount";
 import PrioSolAmount from "@/components/common/PrioSolAmount";
 import RelativeTime from "@/components/common/RelativeTime";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 interface PoolMember {
   id: number;
@@ -97,6 +98,7 @@ interface WorthScore {
 
 export default function PoolDetailPage({ params }: { params: Promise<{ address: string }> }) {
   const [address, setAddress] = useState<string | null>(null);
+  const { confirm, alert } = useConfirm();
   const [member, setMember] = useState<PoolMember | null>(null);
   const [following, setFollowing] = useState<PoolEdge[]>([]);
   const [followers, setFollowers] = useState<PoolEdge[]>([]);
@@ -139,10 +141,25 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
 
   const promote = async () => {
     if (!address) return;
-    if (!confirm(`将 ${address.slice(0, 6)}... 晋升到监控列表？`)) return;
+    const ok = await confirm({
+      title: '晋升到监控列表？',
+      description: (
+        <>
+          将 <span className="font-mono">{address.slice(0, 6)}…{address.slice(-4)}</span>{' '}
+          晋升为监控目标，之后会开始按阈值记录它的 buy 交易。
+        </>
+      ),
+      confirmText: '晋升',
+      variant: 'info',
+    });
+    if (!ok) return;
     const res = await fetch(`/api/pool/${address}/promote`, { method: 'POST' });
     const json = await res.json();
-    if (json.ok) alert('已晋升'); else alert(`失败: ${json.reason ?? json.error}`);
+    if (json.ok) {
+      await alert({ title: '已晋升', variant: 'success' });
+    } else {
+      await alert({ title: '晋升失败', description: json.reason ?? json.error, variant: 'danger' });
+    }
   };
 
   if (loading || !address) return <div className="p-6 text-center text-gray-500">加载中...</div>;

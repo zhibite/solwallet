@@ -20,6 +20,8 @@ export interface AnalyzeBuyer {
   buySol: number;
   tipSol: number;
   prioLamports: number;
+  /** 这笔买入收到的 token 数量；单笔跟单收益按它做 FIFO 配对 */
+  tokenAmount: number | null;
   result: 'success' | 'failed';
   version: string;
   isBundled: boolean;
@@ -179,6 +181,7 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
       buySol: e.buy.buySol,
       tipSol: e.buy.tipSol,
       prioLamports: e.buy.prioLamports,
+      tokenAmount: e.buy.tokenAmount ?? null,
       result: e.buy.success ? 'success' : 'failed',
       version: e.buy.version,
       isBundled: e.buy.isBundled,
@@ -210,6 +213,7 @@ async function fetchBuyBySig(signature: string): Promise<ParsedBuy | null> {
   const row = await queryOne<any>(`
     SELECT signature, slot, block_time, target_address AS address, mint, buy_sol,
            target_tip_sol AS tip_sol, target_prio_lamports AS prio_lamports, 'success'::text AS success,
+           target_token_amount AS token_amount,
            COALESCE(version, 'legacy') AS version, COALESCE(is_bundled, false) AS is_bundled,
            has_alt, bundle_id, '' AS source
     FROM target_trades WHERE signature = $1
@@ -224,6 +228,7 @@ async function fetchBuyBySig(signature: string): Promise<ParsedBuy | null> {
     buySol: parseFloat(row.buy_sol),
     tipSol: parseFloat(row.tip_sol || '0'),
     prioLamports: parseInt(row.prio_lamports || '0', 10),
+    tokenAmount: row.token_amount != null ? Number(row.token_amount) : null,
     fee: 0,
     version: row.version,
     isBundled: row.is_bundled,
@@ -296,11 +301,11 @@ export async function saveBlockAnalysis(
       await client.query(
         `INSERT INTO block_buyers (
            block_analysis_id, slot, block_index, offset_pos, offset_ms, slot_offset,
-           signature, address, buy_sol, tip_sol, prio_lamports,
+           signature, address, buy_sol, tip_sol, prio_lamports, token_amount,
            is_first_sniper, is_follower, is_own, is_pre_target,
            result, version, is_bundled,
            has_alt, bundle_id
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
         [
           analysisId,
           b.slotOffset === 0 ? slot : slot + 1,
@@ -313,6 +318,7 @@ export async function saveBlockAnalysis(
           b.buySol,
           b.tipSol,
           b.prioLamports,
+          b.tokenAmount,
           b.mark === 'first_sniper',
           b.mark === 'follower',
           b.mark === 'own',

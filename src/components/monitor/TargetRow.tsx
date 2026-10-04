@@ -60,8 +60,8 @@ interface Props {
   target: Target;
   onPause: (id: number) => void;
   onResume: (id: number) => void;
-  onDelete: (id: number) => void;
-  onClear: (id: number) => void;
+  onDelete: (t: Target) => void;
+  onClear: (t: Target) => void;
   onThresholdChange: (id: number, val: number) => void;
   decisionCell?: React.ReactNode;
 }
@@ -266,9 +266,9 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
               <button onClick={() => onResume(target.id)} className="text-gray-500 dark:text-gray-400 hover:text-success-500">继续</button>
             )}
             <span className="text-gray-300">|</span>
-            <button onClick={() => onClear(target.id)} className="text-gray-500 dark:text-gray-400 hover:text-brand-500">清记录</button>
+            <button onClick={() => onClear(target)} className="text-gray-500 dark:text-gray-400 hover:text-brand-500">清记录</button>
             <span className="text-gray-300">|</span>
-            <button onClick={() => onDelete(target.id)} className="text-gray-500 dark:text-gray-400 hover:text-error-500">删除</button>
+            <button onClick={() => onDelete(target)} className="text-gray-500 dark:text-gray-400 hover:text-error-500">删除</button>
           </div>
         </td>
       </tr>

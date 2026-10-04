@@ -1,6 +1,7 @@
 "use client";
 import React, { useState, useEffect, useCallback } from "react";
 import PrioSolAmount from "@/components/common/PrioSolAmount";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 import AddTargetForm from "./AddTargetForm";
 import TargetRow from "./TargetRow";
 
@@ -34,6 +35,9 @@ interface Stats {
   analyzed: number;
 }
 
+/** 弹框里显示地址时省略中间，避免撑破布局 */
+const short = (addr: string) => `${addr.slice(0, 6)}…${addr.slice(-4)}`;
+
 export default function MonitorList() {
   const [targets, setTargets] = useState<Target[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
@@ -41,6 +45,7 @@ export default function MonitorList() {
   const [refreshing, setRefreshing] = useState(false); // 静默刷新，不遮挡列表
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'paused'>('all');
   const [busy, setBusy] = useState<null | 'cleanup' | 'clearAll'>(null);
+  const { confirm, alert } = useConfirm();
 
   const load = useCallback(async (isSilent = false) => {
     if (isSilent) setRefreshing(true);
@@ -77,8 +82,49 @@ export default function MonitorList() {
 
   const handlePause = async (id: number) => { await fetch(`/api/targets/${id}/pause`, { method: 'POST' }); load(true); };
   const handleResume = async (id: number) => { await fetch(`/api/targets/${id}/resume`, { method: 'POST' }); load(true); };
-  const handleDelete = async (id: number) => { if (!confirm('确定删除？')) return; await fetch(`/api/targets/${id}`, { method: 'DELETE' }); load(true); };
-  const handleClear = async (id: number) => { if (!confirm('清除所有记录？')) return; await fetch(`/api/targets/${id}/clear`, { method: 'POST' }); load(true); };
+
+  const handleDelete = async (t: Target) => {
+    const ok = await confirm({
+      title: '删除监控目标？',
+      description: (
+        <>
+          即将删除 <span className="font-mono">{short(t.address)}</span>
+          {t.label && <> （{t.label}）</>} 及其名下的全部 buy 记录，此操作不可撤销。
+        </>
+      ),
+      confirmText: '删除',
+      variant: 'danger',
+    });
+    if (!ok) return;
+    const res = await fetch(`/api/targets/${t.id}`, { method: 'DELETE' });
+    const json = await res.json().catch(() => null);
+    if (json && json.ok === false) {
+      await alert({ title: '删除失败', description: json.error, variant: 'danger' });
+    }
+    load(true);
+  };
+
+  const handleClear = async (t: Target) => {
+    const ok = await confirm({
+      title: '清空该目标的记录？',
+      description: (
+        <>
+          将删除 <span className="font-mono">{short(t.address)}</span> 名下的{' '}
+          <span className="font-semibold">{t.record_count}</span> 条 buy 记录，监控目标本身会保留。此操作不可撤销。
+        </>
+      ),
+      confirmText: '清空记录',
+      variant: 'warning',
+    });
+    if (!ok) return;
+    const res = await fetch(`/api/targets/${t.id}/clear`, { method: 'POST' });
+    const json = await res.json().catch(() => null);
+    if (json && json.ok === false) {
+      await alert({ title: '清空失败', description: json.error, variant: 'danger' });
+    }
+    load(true);
+  };
+
   const handleThreshold = async (id: number, val: number) => {
     await fetch(`/api/targets/${id}/threshold`, {
       method: 'POST',
@@ -89,13 +135,22 @@ export default function MonitorList() {
   };
 
   const handleCleanup = async () => {
-    if (!confirm('清理 30 天前的旧记录？此操作不可撤销')) return;
+    const ok = await confirm({
+      title: '清理 30 天前的旧记录？',
+      description: '会删除全部监控目标中 30 天前的 buy 记录，保留监控目标本身。此操作不可撤销。',
+      confirmText: '开始清理',
+      variant: 'warning',
+    });
+    if (!ok) return;
     setBusy('cleanup');
     try {
       const res = await fetch('/api/targets/cleanup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       const json = await res.json();
-      if (json.ok) alert(`已清理 ${json.deleted} 条旧记录`);
-      else alert(`失败: ${json.error}`);
+      if (json.ok) {
+        await alert({ title: '清理完成', description: `已清理 ${json.deleted} 条旧记录`, variant: 'success' });
+      } else {
+        await alert({ title: '清理失败', description: json.error, variant: 'danger' });
+      }
       await load(false);
     } finally {
       setBusy(null);
@@ -103,14 +158,26 @@ export default function MonitorList() {
   };
 
   const handleClearAll = async () => {
-    if (!confirm('清空所有监控记录？此操作不可撤销')) return;
-    if (!confirm('再次确认：会删除全部 target_trades，确定继续？')) return;
+    const ok = await confirm({
+      title: '清空全部监控记录？',
+      description: '会删除所有监控目标下的全部 buy 记录与分析结果，监控目标本身保留。此操作不可撤销。',
+      confirmText: '我确定，全部清空',
+      variant: 'danger',
+    });
+    if (!ok) return;
     setBusy('clearAll');
     try {
       const res = await fetch('/api/targets/clear-all', { method: 'POST' });
       const json = await res.json();
-      if (json.ok) alert(`已清空 ${json.deleted.trades} 条交易、${json.deleted.analyses} 条分析`);
-      else alert(`失败: ${json.error}`);
+      if (json.ok) {
+        await alert({
+          title: '已清空',
+          description: `共删除 ${json.deleted.trades} 条交易、${json.deleted.analyses} 条分析`,
+          variant: 'success',
+        });
+      } else {
+        await alert({ title: '清空失败', description: json.error, variant: 'danger' });
+      }
       await load(false);
     } finally {
       setBusy(null);

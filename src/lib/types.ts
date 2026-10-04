@@ -108,6 +108,12 @@ export interface BlockBuyer {
   bundle_id: string | null;
   /** 0008: 同 bundle 内的笔数（≥2 才有意义） */
   bundle_size: number | null;
+  /** 0007: 这笔买入收到的 token 数量，单笔跟单收益按它做 FIFO 配对 */
+  token_amount: string | null;
+  /** 0007: open=持仓中 / closed=已平仓 / partial=部分平仓 / buy_failed=买入失败 */
+  pnl_status: string | null;
+  /** 0007: 该笔买入的 token 已卖出比例 0~1 */
+  pnl_sold_ratio: string | null;
 }
 
 /** Helius Enhanced Transaction 简化结构 */
@@ -124,6 +130,11 @@ export interface HeliusEnhancedTx {
   type?: string;
   source?: string;
   description?: string;
+  /**
+   * Helius 增强 API 的失败标记。注意失败判定只能看这个字段：
+   * `err` 是 getSignaturesForAddress 才有的，parseTransaction 返回的对象上永远是 undefined。
+   */
+  transactionError?: unknown;
   events?: any;
   instructions?: Array<{ programId: string; accounts: string[]; data: string; innerInstructions?: any[] }>;
 }

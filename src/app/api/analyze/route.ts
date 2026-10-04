@@ -1,17 +1,18 @@
 /**
  * /api/analyze
- * POST - 对某个地址做历史 PnL 分析
- * body: { address, from, to, includeFailed }
+ * POST - 对某个地址做历史单笔跟单收益分析
+ * body: { address, from, to }
+ *
+ * 每一笔买入独立按 token 数量 FIFO 配对算自己的收益，然后汇总。
+ * 汇总时「持仓中」的买入不计入已实现盈亏，单独计数。
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { query, queryOne } from '@/lib/db';
 import { getHelius } from '@/lib/helius';
-import { getRPC } from '@/lib/solana-rpc';
 import { parseHeliusTx } from '@/lib/parser';
-import { calcTradePnL } from '@/lib/pnl';
+import { calcCopyPnl, isFailedTx } from '@/lib/pnl';
 
 export async function POST(req: NextRequest) {
-  const { address, from, to, includeFailed } = await req.json();
+  const { address, from, to } = await req.json();
 
   if (!address || typeof address !== 'string') {
     return NextResponse.json({ ok: false, error: 'address 不合法' }, { status: 400 });
@@ -22,7 +23,6 @@ export async function POST(req: NextRequest) {
 
   try {
     const helius = getHelius();
-    const rpc = getRPC();
 
     // 1) 拉签名
     const sigs = await helius.getSignaturesForAddress(address, { limit: 200 });
@@ -30,35 +30,40 @@ export async function POST(req: NextRequest) {
 
     // 2) 解析每一笔，找出 buy
     const trades = [];
-    let totalPnl = 0;
-    let failedFee = 0;
-    let confirmed = 0;
-    let pending = 0;
+    let realizedPnl = 0;
+    let openCount = 0;
+    let closedCount = 0;
+    let partialCount = 0;
+    let buyFailedCount = 0;
     let buyCount = 0;
-    let failed = 0;
+    let failedFee = 0;
 
     for (const s of inRange) {
       if (s.err) continue;
       try {
         const tx = await helius.parseTransaction(s.signature);
-        if (!tx) continue;
+        if (!tx || isFailedTx(tx)) continue;
         const buy = parseHeliusTx(tx);
         if (!buy || buy.address !== address) continue;
 
         buyCount++;
-        const result = await calcTradePnL({
+        const result = await calcCopyPnl({
           mint: buy.mint,
           buySig: buy.signature,
           buyWallet: address,
           buySol: buy.buySol,
           buyBlockTime: buy.blockTime,
-          includeFailed,
+          buyTokenAmount: buy.tokenAmount ?? null,
+          buyFeeLamports: tx.fee ?? null,
         });
-        totalPnl += result.totalPnl;
-        failedFee += result.failedFee;
-        confirmed += result.confirmed;
-        pending += result.pending;
-        failed += result.failed;
+        if (result.pnlSol != null) realizedPnl += result.pnlSol;
+        failedFee += result.failedFeeSol;
+        // 四个状态必须全部计数：前端「已平仓」标签同时筛 closed + partial，
+        // 「持仓中」同时筛 open + buy_failed，只数其中两个会让标签上的数字对不上行数。
+        if (result.status === 'open') openCount++;
+        if (result.status === 'closed') closedCount++;
+        if (result.status === 'partial') partialCount++;
+        if (result.status === 'buy_failed') buyFailedCount++;
 
         trades.push({
           signature: buy.signature,
@@ -66,8 +71,10 @@ export async function POST(req: NextRequest) {
           blockTime: buy.blockTime,
           mint: buy.mint,
           sol: buy.buySol,
-          pnl: result.totalPnl,
-          status: result.confirmed > 0 ? 'confirmed' : result.pending > 0 ? 'pending' : 'failed',
+          tokenAmount: result.buyTokenAmount,
+          pnl: result.pnlSol,
+          status: result.status,
+          soldRatio: result.soldRatio,
           version: buy.version,
           tip: buy.tipSol,
           prio: buy.prioLamports,
@@ -81,13 +88,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       ok: true,
       data: {
-        totalPnl,
+        realizedPnl,
         failedFee,
-        netPnl: totalPnl - failedFee,
         buyCount,
-        failed,
-        confirmed,
-        pending,
+        closedCount,
+        openCount,
+        partialCount,
+        buyFailedCount,
         trades,
       },
     });

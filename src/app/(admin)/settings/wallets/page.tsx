@@ -2,6 +2,7 @@
 import React, { useEffect, useState } from "react";
 import AddressCopy from "@/components/common/AddressCopy";
 import { TrashBinIcon, PlusIcon } from "@/icons";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 interface Wallet {
   id: number;
@@ -12,6 +13,7 @@ interface Wallet {
 
 export default function WalletsPage() {
   const [wallets, setWallets] = useState<Wallet[]>([]);
+  const { confirm } = useConfirm();
   const [address, setAddress] = useState('');
   const [label, setLabel] = useState('');
   const [loading, setLoading] = useState(true);
@@ -39,7 +41,20 @@ export default function WalletsPage() {
   };
 
   const del = async (id: number) => {
-    if (!confirm('确定删除？')) return;
+    const w = wallets.find((x) => x.id === id);
+    const ok = await confirm({
+      title: '删除该钱包？',
+      description: (
+        <>
+          将从自己的钱包列表移除{' '}
+          <span className="font-mono">{w ? `${w.address.slice(0, 6)}…${w.address.slice(-4)}` : `#${id}`}</span>
+          {w?.label && <> （{w.label}）</>}，之后 block 分析中的「我的账号」标记会重新计算。
+        </>
+      ),
+      confirmText: '删除',
+      variant: 'danger',
+    });
+    if (!ok) return;
     await fetch(`/api/wallets?id=${id}`, { method: 'DELETE' });
     load();
   };

@@ -2,6 +2,7 @@
 import React, { useEffect, useState } from "react";
 import AddressCopy from "@/components/common/AddressCopy";
 import RelativeTime from "@/components/common/RelativeTime";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 interface Row {
   id: number;
@@ -33,6 +34,7 @@ export default function LibraryPage() {
   const [loading, setLoading] = useState(true);
   const [newAddress, setNewAddress] = useState('');
   const [newLabel, setNewLabel] = useState('');
+  const { confirm, alert } = useConfirm();
 
   const load = () => {
     setLoading(true);
@@ -62,13 +64,38 @@ export default function LibraryPage() {
   };
 
   const del = async (id: number) => {
-    if (!confirm('确定删除？')) return;
+    const row = rows.find((r) => r.id === id);
+    const ok = await confirm({
+      title: '从跟单库删除？',
+      description: (
+        <>
+          将移除 <span className="font-mono">{row ? `${row.address.slice(0, 6)}…${row.address.slice(-4)}` : `#${id}`}</span>
+          {row?.label && <> （{row.label}）</>}，此操作不可撤销。
+        </>
+      ),
+      confirmText: '删除',
+      variant: 'danger',
+    });
+    if (!ok) return;
     await fetch(`/api/library?id=${id}`, { method: 'DELETE' });
     load();
   };
 
   const removeOwn = async (id: number) => {
-    if (!confirm('删除此跟单钱包？')) return;
+    const w = ownWallets.find((x) => x.id === id);
+    const ok = await confirm({
+      title: '删除该跟单钱包？',
+      description: (
+        <>
+          将从自己的钱包列表移除{' '}
+          <span className="font-mono">{w ? `${w.address.slice(0, 6)}…${w.address.slice(-4)}` : `#${id}`}</span>
+          ，之后 block 分析中的「我的账号」标记会重新计算。
+        </>
+      ),
+      confirmText: '删除',
+      variant: 'danger',
+    });
+    if (!ok) return;
     await fetch(`/api/wallets?id=${id}`, { method: 'DELETE' });
     load();
   };

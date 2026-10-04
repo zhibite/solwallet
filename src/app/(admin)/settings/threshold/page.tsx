@@ -1,6 +1,7 @@
 "use client";
 import React, { useEffect, useState } from "react";
 import AddressCopy from "@/components/common/AddressCopy";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 interface Target {
   id: number;
@@ -11,6 +12,7 @@ interface Target {
 export default function ThresholdPage() {
   const [targets, setTargets] = useState<Target[]>([]);
   const [defaultThreshold, setDefaultThreshold] = useState('0.5');
+  const { alert } = useConfirm();
 
   useEffect(() => {
     fetch('/api/targets')
@@ -29,7 +31,7 @@ export default function ThresholdPage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ DEFAULT_THRESHOLD: defaultThreshold }),
     });
-    alert('已保存');
+    await alert({ title: '已保存', variant: 'success' });
   };
 
   return (

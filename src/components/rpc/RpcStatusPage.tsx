@@ -1,5 +1,6 @@
 "use client";
 import React, { useEffect, useState } from "react";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 interface Endpoint {
   url: string;
@@ -33,6 +34,7 @@ export default function RpcStatusPage() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<any>(null);
+  const { confirm } = useConfirm();
 
   const load = async () => {
     try {
@@ -52,7 +54,13 @@ export default function RpcStatusPage() {
   }, [autoRefresh]);
 
   const clearCache = async () => {
-    if (!confirm('确认清空所有缓存？')) return;
+    const ok = await confirm({
+      title: '清空所有缓存？',
+      description: '会清掉 Redis / 内存里的全部缓存数据，短时间内需要重新回源拉取。此操作不可撤销。',
+      confirmText: '清空缓存',
+      variant: 'warning',
+    });
+    if (!ok) return;
     setClearing(true);
     try {
       await fetch('/api/cache/stats', { method: 'POST' });

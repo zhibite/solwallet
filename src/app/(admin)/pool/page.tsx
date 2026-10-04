@@ -4,6 +4,7 @@ import Link from "next/link";
 import AddressCopy from "@/components/common/AddressCopy";
 import SolAmount from "@/components/common/SolAmount";
 import PrioSolAmount from "@/components/common/PrioSolAmount";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 interface PoolMember {
   id: number;
@@ -51,6 +52,7 @@ export default function PoolPage() {
   const [roleFilter, setRoleFilter] = useState<'all' | 'first_sniper' | 'follower'>('all');
   const [akbotFilter, setAkbotFilter] = useState<'all' | 'akbot' | 'normal'>('all');
   const [bfsBusy, setBfsBusy] = useState(false);
+  const { confirm, alert } = useConfirm();
 
   const load = async () => {
     setLoading(true);
@@ -96,10 +98,14 @@ export default function PoolPage() {
       const res = await fetch('/api/pool/discover', { method: 'POST' });
       const json = await res.json();
       if (json.ok) {
-        alert(`BFS 完成: 扫描 ${json.data.bfs.result?.scannedTargets ?? 0} 个 target, 晋升 ${json.data.bfs.result?.totalPromoted ?? 0} 个`);
+        await alert({
+          title: 'BFS 完成',
+          description: `扫描 ${json.data.bfs.result?.scannedTargets ?? 0} 个 target，晋升 ${json.data.bfs.result?.totalPromoted ?? 0} 个`,
+          variant: 'success',
+        });
         await load();
       } else {
-        alert(`失败: ${json.error}`);
+        await alert({ title: 'BFS 失败', description: json.error, variant: 'danger' });
       }
     } finally {
       setBfsBusy(false);
@@ -107,14 +113,25 @@ export default function PoolPage() {
   };
 
   const promote = async (address: string) => {
-    if (!confirm(`将 ${address.slice(0, 6)}... 晋升到监控列表？`)) return;
+    const ok = await confirm({
+      title: '晋升到监控列表？',
+      description: (
+        <>
+          将 <span className="font-mono">{address.slice(0, 6)}…{address.slice(-4)}</span>{' '}
+          晋升为监控目标，之后会开始按阈值记录它的 buy 交易。
+        </>
+      ),
+      confirmText: '晋升',
+      variant: 'info',
+    });
+    if (!ok) return;
     const res = await fetch(`/api/pool/${address}/promote`, { method: 'POST' });
     const json = await res.json();
     if (json.ok) {
-      alert('已晋升');
+      await alert({ title: '已晋升', description: `${address.slice(0, 6)}…${address.slice(-4)} 已加入监控列表`, variant: 'success' });
       await load();
     } else {
-      alert(`失败: ${json.reason ?? json.error}`);
+      await alert({ title: '晋升失败', description: json.reason ?? json.error, variant: 'danger' });
     }
   };
 

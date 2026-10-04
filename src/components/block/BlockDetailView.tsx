@@ -4,6 +4,7 @@ import AddressCopy from "@/components/common/AddressCopy";
 import SolAmount from "@/components/common/SolAmount";
 import PrioSolAmount from "@/components/common/PrioSolAmount";
 import RelativeTime from "@/components/common/RelativeTime";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 interface BlockDetailViewProps {
   /** Slot 编号 */
@@ -24,6 +25,9 @@ interface Buyer {
   tip_sol: string | null;
   prio_lamports: number | null;
   pnl_sol: string | null;
+  pnl_status: string | null;
+  pnl_sold_ratio: string | null;
+  token_amount: string | null;
   is_first_sniper: boolean;
   is_follower: boolean;
   is_own: boolean;
@@ -57,6 +61,7 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [recalculating, setRecalculating] = useState(false);
+  const { confirm, alert } = useConfirm();
 
   const load = async () => {
     setLoading(true);
@@ -103,39 +108,67 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ address, label: `from block ${slot}` }),
     });
-    alert(`已加入跟单钱包: ${address.slice(0, 8)}...`);
+    await alert({
+      title: '已加入跟单库',
+      description: `${address.slice(0, 8)}... 已标记为跟单钱包`,
+      variant: 'success',
+    });
     await load();
   };
 
-  /** 行级：算 / 重算 该 buyer 的 PnL */
+  /** 行级：算 / 重算 该 buyer 的单笔跟单收益 */
   const calcBuyerPnL = async (buyerId: number) => {
     const res = await fetch(`/api/block/${slot}/${mint}/buyer/${buyerId}/pnl`, {
       method: 'POST',
     });
     const json = await res.json();
     if (!json.ok) {
-      alert(`算收益失败: ${json.error}`);
+      await alert({ title: '算收益失败', description: json.error, variant: 'danger' });
       return;
     }
     // 局部更新
     setBuyers((prev) =>
-      prev.map((b) => (b.id === buyerId ? { ...b, pnl_sol: json.pnl_sol !== null ? String(json.pnl_sol) : null } : b)),
+      prev.map((b) =>
+        b.id === buyerId
+          ? {
+              ...b,
+              pnl_sol: json.pnl_sol !== null ? String(json.pnl_sol) : null,
+              pnl_status: json.pnl_status ?? null,
+              pnl_sold_ratio: json.sold_ratio != null ? String(json.sold_ratio) : null,
+            }
+          : b,
+      ),
     );
   };
 
-  /** 行级：取消算（清空 pnl_sol） */
+  /** 行级：取消算（清空 pnl_sol / pnl_status / pnl_sold_ratio） */
   const clearBuyerPnL = async (buyerId: number) => {
     const res = await fetch(`/api/block/${slot}/${mint}/buyer/${buyerId}/pnl`, {
       method: 'DELETE',
     });
     if (res.ok) {
-      setBuyers((prev) => prev.map((b) => (b.id === buyerId ? { ...b, pnl_sol: null } : b)));
+      setBuyers((prev) =>
+        prev.map((b) =>
+          b.id === buyerId ? { ...b, pnl_sol: null, pnl_status: null, pnl_sold_ratio: null } : b,
+        ),
+      );
     }
   };
 
   /** 行级：取消认定（从 own_wallets 删除该地址 + 重跑 block 分析） */
   const unclaimWallet = async (buyerId: number, address: string) => {
-    if (!confirm('取消对该钱包的「我的账号」认定？')) return;
+    const ok = await confirm({
+      title: '取消「我的账号」认定？',
+      description: (
+        <>
+          将 <span className="font-mono">{address.slice(0, 6)}…{address.slice(-4)}</span>{' '}
+          从自己的钱包列表移除，并重跑该 block 的分析。此操作不可撤销。
+        </>
+      ),
+      confirmText: '取消认定',
+      variant: 'warning',
+    });
+    if (!ok) return;
     setRecalculating(true);
     try {
       await fetch(`/api/wallets?address=${encodeURIComponent(address)}`, { method: 'DELETE' });
@@ -331,7 +364,29 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
                       <PrioSolAmount value={b.prio_lamports} />
                     </td>
                     <td className="px-3 py-2 text-right">
-                      <SolAmount value={b.pnl_sol} signed />
+                      {b.pnl_status === 'open' ? (
+                        <span className="font-mono text-xs text-warning-500" title="这笔买入的 token 还没卖出，收益未实现">
+                          持仓中
+                        </span>
+                      ) : b.pnl_status === 'buy_failed' ? (
+                        <span className="font-mono text-xs text-error-500" title="买入交易失败，成本只有手续费">
+                          买入失败
+                        </span>
+                      ) : b.pnl_sol ? (
+                        <>
+                          <SolAmount value={b.pnl_sol} signed />
+                          {b.pnl_status === 'partial' && b.pnl_sold_ratio && (
+                            <span
+                              className="ml-1 text-[10px] text-brand-500"
+                              title={`这笔买入的 token 只卖出了 ${(parseFloat(b.pnl_sold_ratio) * 100).toFixed(0)}%，这里只统计已实现部分`}
+                            >
+                              {(parseFloat(b.pnl_sold_ratio) * 100).toFixed(0)}%
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        <SolAmount value={b.pnl_sol} signed />
+                      )}
                     </td>
                     <td className="px-3 py-2 text-center">
                       {b.result === 'success' ? (
@@ -367,7 +422,7 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
                           </button>
                         ) : (
                           <>
-                            {!b.pnl_sol ? (
+                            {!b.pnl_status ? (
                               <button
                                 onClick={() => calcBuyerPnL(b.id)}
                                 className="text-gray-500 dark:text-gray-400 hover:text-brand-500"

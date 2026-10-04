@@ -46,7 +46,7 @@ export interface ParsedBuy {
   bundleId: string | null;  // 同 bundle 的多笔共享同一 ID
   source: string;           // pump.fun / raydium / jupiter 等
   success: boolean;
-  tokenAmount?: number;
+  tokenAmount?: number | null;
 }
 
 /** 检查交易是否可能为 swap/buy */
@@ -65,12 +65,49 @@ export function extractMint(tx: HeliusEnhancedTx): string | null {
   if (!tx.tokenTransfers || tx.tokenTransfers.length === 0) return null;
 
   // 优先取接收方为 feePayer 的 transfer（=买入的目标 token）
-  const inbound = tx.tokenTransfers.find((t) => t.toUserAccount === tx.feePayer);
+  const inbound = findInboundTransfer(tx);
   if (inbound) return inbound.mint;
 
   // 否则取 amount 最大的
   const sorted = [...tx.tokenTransfers].sort((a, b) => (b.tokenAmount || 0) - (a.tokenAmount || 0));
   return sorted[0]?.mint ?? null;
+}
+
+/**
+ * 找出「流入 feePayer」的那条 token transfer。
+ *
+ * extractMint 靠它定 mint，之前 tokenAmount 却直接取 tokenTransfers[0]，
+ * 两者可能不是同一条（数组顺序不保证按金额排），导致落库的 token 数量
+ * 跟 mint 对不上，FIFO 配对就会算错。
+ */
+function findInboundTransfer(tx: HeliusEnhancedTx) {
+  if (!tx.tokenTransfers || tx.tokenTransfers.length === 0) return null;
+  return (
+    tx.tokenTransfers.find((t) => t.toUserAccount === tx.feePayer) ??
+    [...tx.tokenTransfers].sort((a, b) => (b.tokenAmount || 0) - (a.tokenAmount || 0))[0] ??
+    null
+  );
+}
+
+/**
+ * 某笔交易里，指定 mint 流入 owner 的 token 数量（买入数量）。
+ *
+ * owner 通常就是 feePayer，但 Jito bundle / relayer 代付场景下 feePayer 可能是别人，
+ * 而 token 的实际持有人是钱包本身，所以两个账户都要认。
+ */
+export function inboundTokenAmount(tx: HeliusEnhancedTx, mint: string, owner?: string): number {
+  const mine = (t: { mint: string; toUserAccount: string }) =>
+    t.mint === mint && (t.toUserAccount === tx.feePayer || t.toUserAccount === owner);
+  const t = (tx.tokenTransfers ?? []).find(mine);
+  return t ? Number(t.tokenAmount) : 0;
+}
+
+/** 某笔交易里，指定 mint 从 owner 流出的 token 数量（卖出数量） */
+export function outboundTokenAmount(tx: HeliusEnhancedTx, mint: string, owner?: string): number {
+  const mine = (t: { mint: string; fromUserAccount: string }) =>
+    t.mint === mint && (t.fromUserAccount === tx.feePayer || t.fromUserAccount === owner);
+  const t = (tx.tokenTransfers ?? []).find(mine);
+  return t ? Number(t.tokenAmount) : 0;
 }
 
 /** 计算买入花费的 SOL（含 jito tip 与 priority fee） */
@@ -286,7 +323,7 @@ export function parseHeliusTx(tx: HeliusEnhancedTx): ParsedBuy | null {
     //   - 拿不到时（webhook payload 等）默认 true（feePayer 已收 token = 买入成功完成）
     // 注：旧实现 `!tx.fee || true` 因 `|| true` 永远为 true，是个 dead branch。
     success: !(tx as any).transactionError,
-    tokenAmount: tx.tokenTransfers?.[0]?.tokenAmount,
+    tokenAmount: findInboundTransfer(tx)?.tokenAmount,
   };
 }
 
