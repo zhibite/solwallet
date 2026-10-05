@@ -153,7 +153,10 @@ export class Cache {
 export const cacheKeys = {
   block: (slot: number) => `block:${slot}`,
   tx: (sig: string) => `tx:${sig}`,
-  sigs: (addr: string, before: string | undefined) => `sigs:${addr}:${before ?? 'latest'}`,
+  // until 必须进键。锚定翻页（until=买入签名）下，同一个 before 的两次请求
+  // 答案完全不同；漏掉 until 会让「同一钱包在两个区块各买过一次」拿到同一份签名窗口。
+  sigs: (addr: string, before: string | undefined, until: string | undefined) =>
+    `sigs:${addr}:${before ?? 'latest'}:${until ?? 'earliest'}`,
   tokenPrice: (mint: string) => `price:${mint}`,
   rpcHealth: (url: string) => `rpchealth:${encodeURIComponent(url)}`,
   targetTrades: (targetId: number, page: number) => `targettrades:${targetId}:${page}`,

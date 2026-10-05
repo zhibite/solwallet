@@ -15,7 +15,8 @@ interface Target {
   last_buy_at: string | null;
   updated_at: string;
   decision?: {
-    worth_score: number;
+    /** null = 样本不足算不出分，不是 0 分 */
+    worth_score: number | null;
     win_rate: number;
     avg_pnl_sol: number;
     p50_tip_sol: number;
@@ -291,8 +292,12 @@ export default function MonitorList() {
 
 function DecisionCell({ d }: { d: Target['decision'] }) {
   if (!d) return <span className="text-xs text-gray-400">-</span>;
+  // worth_score 为 null = 样本不足算不出分，不是 0 分。判空后再调 toFixed。
   const s = d.worth_score;
-  const color = s > 1 ? 'text-success-500' : s < -0.5 ? 'text-error-500' : 'text-warning-500';
+  const scoreable = s != null;
+  const color = !scoreable ? 'text-gray-400'
+    : s > 1 ? 'text-success-500'
+    : s < -0.5 ? 'text-error-500' : 'text-warning-500';
   const tipText = d.p75_tip_sol ? d.p75_tip_sol.toFixed(4) : '-';
   return (
     <div className="text-xs space-y-0.5">
@@ -304,12 +309,20 @@ function DecisionCell({ d }: { d: Target['decision'] }) {
         <PrioSolAmount value={d.p75_prio_lamports} />
       </div>
       <div className="flex items-center gap-2">
-        <span className={`font-mono font-semibold ${color}`}>{s.toFixed(2)}</span>
-        <span className="text-gray-400">
-          胜率 {(d.win_rate * 100).toFixed(0)}%
+        <span className={`font-mono font-semibold ${color}`}>
+          {scoreable ? s.toFixed(2) : '-'}
         </span>
-        {d.sample_size === 0 && (
-          <span className="text-xs text-gray-400">样本不足</span>
+        {scoreable ? (
+          <span className="text-gray-400">
+            胜率 {(d.win_rate * 100).toFixed(0)}%
+          </span>
+        ) : (
+          <span className="text-xs text-gray-400" title="已实现收益的样本不足 3 笔，暂不评分">
+            样本不足
+          </span>
+        )}
+        {d.sample_size === 0 && scoreable && (
+          <span className="text-xs text-gray-400">手续费无样本</span>
         )}
       </div>
     </div>

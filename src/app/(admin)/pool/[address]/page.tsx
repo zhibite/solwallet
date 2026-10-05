@@ -87,13 +87,20 @@ interface FeeRec {
 }
 
 interface WorthScore {
-  offered: number;
+  /** null = 样本不足等算不出分的情况，不是 0 分。渲染前必须判空 */
+  offered: number | null;
   win_rate: number;
   avg_pnl_sol: number;
+  median_pnl_sol: number;
   total_pnl_sol: number;
   avg_fee_sol: number;
   cost_ratio: number;
+  /** 计入评分的样本数（已实现 pnl 的笔数） */
   trade_count: number;
+  /** 回溯窗口内买入总笔数，含持仓中等算不出 pnl 的 */
+  total_buys: number;
+  /** 算不出分的原因 */
+  reason: string | null;
 }
 
 export default function PoolDetailPage({ params }: { params: Promise<{ address: string }> }) {
@@ -254,11 +261,11 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
         <Card label="总 PnL" value={<SolAmount value={score?.total_pnl_sol} signed />} />
         <Card label="胜率" value={`${((score?.win_rate ?? 0) * 100).toFixed(1)}%`} />
         <Card label="跟单评分" value={
-          score ? (
+          score?.offered != null ? (
             <span className={score.offered > 1 ? 'text-success-500' : score.offered < -0.5 ? 'text-error-500' : 'text-warning-500'}>
               {score.offered.toFixed(2)}
             </span>
-          ) : '-'
+          ) : <span className="text-gray-400" title={score?.reason ?? undefined}>-</span>
         } />
       </div>
 
@@ -319,10 +326,11 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
             </div>
             <div className="flex items-baseline gap-2 mb-2">
               <span className={`font-mono text-3xl font-bold leading-none ${
-                (score?.offered ?? 0) > 1 ? 'text-success-500' :
-                (score?.offered ?? 0) < -0.5 ? 'text-error-500' : 'text-warning-500'
+                score?.offered == null ? 'text-gray-300' :
+                score.offered > 1 ? 'text-success-500' :
+                score.offered < -0.5 ? 'text-error-500' : 'text-warning-500'
               }`}>
-                {score ? score.offered.toFixed(2) : '-'}
+                {score?.offered != null ? score.offered.toFixed(2) : '-'}
               </span>
               <span className="text-[11px] text-gray-400">综合评分</span>
             </div>
@@ -339,26 +347,33 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
           </div>
         </div>
 
-        {/* 结论 banner */}
-        {score && score.offered > 1 && (
+        {/* 结论 banner —— offered 为 null 表示算不出分，不参与三档结论 */}
+        {score?.offered != null && score.offered > 1 && (
           <div className="mt-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/30 text-emerald-700 dark:text-emerald-400 text-sm">
             <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500 text-white text-xs">✓</span>
             <span className="font-medium">推荐跟单</span>
             <span className="text-xs opacity-70">综合评分 {score.offered.toFixed(2)}，预期为正</span>
           </div>
         )}
-        {score && score.offered < -0.5 && (
+        {score?.offered != null && score.offered < -0.5 && (
           <div className="mt-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 text-red-700 dark:text-red-400 text-sm">
             <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-red-500 text-white text-xs">✗</span>
             <span className="font-medium">不推荐跟单</span>
             <span className="text-xs opacity-70">PnL 为负 ({score.offered.toFixed(2)})</span>
           </div>
         )}
-        {score && score.offered >= -0.5 && score.offered <= 1 && (
+        {score?.offered != null && score.offered >= -0.5 && score.offered <= 1 && (
           <div className="mt-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 text-amber-700 dark:text-amber-400 text-sm">
             <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-amber-500 text-white text-xs">!</span>
             <span className="font-medium">观望</span>
             <span className="text-xs opacity-70">收益空间有限 (评分 {score.offered.toFixed(2)})</span>
+          </div>
+        )}
+        {score != null && score.offered == null && (
+          <div className="mt-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-50 dark:bg-zinc-800/60 border border-gray-200 dark:border-zinc-700 text-gray-600 dark:text-gray-400 text-sm">
+            <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-gray-400 text-white text-xs">?</span>
+            <span className="font-medium">样本不足，暂不评分</span>
+            <span className="text-xs opacity-70">{score.reason}</span>
           </div>
         )}
       </div>

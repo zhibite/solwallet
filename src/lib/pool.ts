@@ -18,9 +18,11 @@
 import { query, queryOne, execute, withTransaction } from './db';
 
 // 调优参数（可通过 env 覆盖）
+// 兜底默认值已与 .env 对齐（2026-10-05 从 3/2 收紧到 8/4）：
+// 原来 .env 配 8/4 而这里仍是 3/2，一旦 .env 缺失或变量名写错会静默退回宽松门槛且不报错。
 const SCAN_TRADES_PER_TARGET = parseInt(process.env.POOL_SCAN_TRADES || '20', 10);
-const PROMOTE_FREQ_THRESHOLD = parseInt(process.env.POOL_PROMOTE_FREQ || '3', 10); // 至少 N 次才晋升
-const PROMOTE_MIN_DISTINCT_TARGETS = parseInt(process.env.POOL_PROMOTE_DISTINCT || '2', 10); // 至少跟过 N 个独立 target
+const PROMOTE_FREQ_THRESHOLD = parseInt(process.env.POOL_PROMOTE_FREQ || '8', 10); // 至少 N 次才晋升
+const PROMOTE_MIN_DISTINCT_TARGETS = parseInt(process.env.POOL_PROMOTE_DISTINCT || '4', 10); // 至少跟过 N 个独立 target
 const PROMOTE_DEFAULT_THRESHOLD = parseFloat(process.env.POOL_PROMOTE_THRESHOLD || '0.5');
 const BFS_MAX_DEPTH = parseInt(process.env.POOL_BFS_DEPTH || '3', 10);
 
