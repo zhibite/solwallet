@@ -15,7 +15,7 @@ import { getHelius, isHeliusConfigured } from './helius';
 import { getMultiRpc } from './multi-rpc';
 import { parseHeliusTx } from './parser';
 import { saveBlockAnalysis } from './first-sniper';
-import { quickAkbotCheck } from './akbot';
+import { quickAkbotCheck, isAkbotCircuitOpen } from './akbot';
 import { markAsAkbot } from './pool';
 
 const POLL_INTERVAL_MS = parseInt(process.env.MONITOR_POLL_INTERVAL_MS || '5000', 10);
@@ -257,10 +257,12 @@ export async function ingestTargetTrade(targetId: number, buy: any, rawTx: any) 
       }
 
       // 4) 实时 AkBot 检测：对这次 block 的所有非 own / 非 target 买家，
-      //    各跑一次 quickAkbotCheck（最近 200 签名），命中即异步标记。
+      //    各跑一次 quickAkbotCheck（最近 200 签名），命中即标记。
       //    顺序执行 + 150ms throttle 防止 Helius 速率限制；
       //    再套一层 setImmediate 做到真正 fire-and-forget —— 不阻塞下一次 analyzeBlock/pool scan。
       //    （webhook 突发时，analyzeBlock 不会因 akbot 排队而堆积。）
+      //    被熔断/限流打断的地址由 scheduleAkbotChecksForBuyers 内部的
+      //    akbotRetryQueue 补扫，不会因为离开这个 block 就丢失。
       setImmediate(() => {
         scheduleAkbotChecksForBuyers(analyzeResult.buyers).catch((e) =>
           console.warn('[monitor] akbot check failed:', (e as Error).message),
@@ -273,11 +275,24 @@ export async function ingestTargetTrade(targetId: number, buy: any, rawTx: any) 
 }
 
 /**
+ * AKBot 检测被熔断/限流打断时，地址会进这里等重试。
+ *
+ * 为什么不靠「下一轮监控自然会重试」：每轮监控的入参是该 block 的新买家，
+ * 被熔断吞掉的地址属于上一个 block，不会再进这个列表 —— 静默丢弃就是永久漏检。
+ * 队列上限防止 Helius 长时间不可用时无限堆积。
+ */
+const akbotRetryQueue: string[] = [];
+const AKBOT_RETRY_MAX = 500;
+let akbotRetryTimer: NodeJS.Timeout | null = null;
+const AKBOT_RETRY_INTERVAL_MS = 30_000;
+
+/**
  * 对一批买家跑轻量 AkBot 检测
  * - 跳过 mark === 'target' / 'own'
  * - 同地址只跑一次
- * - 命中后立即 markAsAkbot（幂等）
+ * - 命中后 markAsAkbot（幂等，池外地址也会 upsert 落标记）
  * - 顺序执行 + 150ms throttle（Helius free ~10 RPS，paid ~50 RPS）
+ * - 熔断/限流导致没扫成的地址进 akbotRetryQueue，后台补扫
  *
  * 每个 event 5-20 个新买家 → 顺序执行 ≈ 1-3s。
  * 故意做成在 setImmediate 里调用，避免阻塞 monitor 主流程（analyzeBlock / pool scan / 下一次事件）。
@@ -300,20 +315,72 @@ export async function scheduleAkbotChecksForBuyers(
 
   const SLEEP_MS = 150;
   for (const addr of targets) {
-    try {
-      const ev = await quickAkbotCheck(addr);
-      if (ev) {
-        await markAsAkbot(addr, ev.signature, ev.blockTime, ev.slot);
-        console.log(
-          `[monitor] akbot detected ${addr.slice(0, 8)}…${addr.slice(-4)} evidence=${ev.signature.slice(0, 12)}…`,
-        );
-      }
-    } catch (err) {
-      // 单个地址失败不影响其它
-      console.warn(`[monitor] quickAkbotCheck ${addr.slice(0, 8)}… failed: ${(err as Error).message}`);
-    }
+    await checkOneAddressForAkbot(addr);
     if (SLEEP_MS > 0) await new Promise((r) => setTimeout(r, SLEEP_MS));
   }
+
+  // 有地址因熔断没扫成 → 起一个后台重试循环，熔断结束后自动补扫
+  scheduleAkbotRetryDrain();
+}
+
+/** 扫一个地址并落标记；inconclusive 的地址进重试队列 */
+async function checkOneAddressForAkbot(addr: string): Promise<void> {
+  try {
+    const res = await quickAkbotCheck(addr);
+    if (res.status === 'found') {
+      // markAsAkbot 返回 false = 该地址本来就已标记，别再刷一遍 detected 日志
+      const wrote = await markAsAkbot(addr, res.evidence.signature, res.evidence.blockTime, res.evidence.slot);
+      if (wrote) {
+        console.log(
+          `[monitor] akbot detected ${addr.slice(0, 8)}…${addr.slice(-4)} evidence=${res.evidence.signature.slice(0, 12)}…`,
+        );
+      }
+    } else if (res.status === 'inconclusive') {
+      enqueueAkbotRetry(addr, res.reason);
+    }
+    // status === 'clean'：扫完了确实不是 akbot，不用再管
+  } catch (err) {
+    // 单个地址失败不影响其它；同样入队，别让异常路径变成漏检
+    console.warn(`[monitor] quickAkbotCheck ${addr.slice(0, 8)}… failed: ${(err as Error).message}`);
+    enqueueAkbotRetry(addr, `error: ${(err as Error).message}`);
+  }
+}
+
+function enqueueAkbotRetry(addr: string, reason: string): void {
+  if (akbotRetryQueue.includes(addr)) return;
+  if (akbotRetryQueue.length >= AKBOT_RETRY_MAX) {
+    // 队列满：丢掉最老的一个，保证新地址还能进来
+    akbotRetryQueue.shift();
+  }
+  akbotRetryQueue.push(addr);
+  console.warn(
+    `[monitor] akbot check inconclusive (${reason}), queued for retry ${addr.slice(0, 8)}… (${akbotRetryQueue.length} pending)`,
+  );
+}
+
+function scheduleAkbotRetryDrain(): void {
+  if (akbotRetryTimer || akbotRetryQueue.length === 0) return;
+  akbotRetryTimer = setInterval(() => {
+    if (akbotRetryQueue.length === 0) {
+      if (akbotRetryTimer) clearInterval(akbotRetryTimer);
+      akbotRetryTimer = null;
+      return;
+    }
+    // 串行排空，一批最多 20 个，避免和实时检测撞在一起
+    const batch = akbotRetryQueue.splice(0, 20);
+    (async () => {
+      for (let i = 0; i < batch.length; i++) {
+        // 熔断还开着就整批放回队首，等下个周期，别浪费这一批
+        if (isAkbotCircuitOpen()) {
+          akbotRetryQueue.unshift(...batch.slice(i));
+          return;
+        }
+        await checkOneAddressForAkbot(batch[i]);
+      }
+    })().catch((e) => console.warn('[monitor] akbot retry drain failed:', (e as Error).message));
+  }, AKBOT_RETRY_INTERVAL_MS);
+  // 别让重试定时器吊住进程退出
+  if (typeof akbotRetryTimer.unref === 'function') akbotRetryTimer.unref();
 }
 
 /** 同步 Helius Webhook（handler 调用） */

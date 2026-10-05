@@ -51,13 +51,32 @@ export interface AkbotEvidence {
 }
 
 /**
+ * 扫描结果。
+ *
+ * 为什么不用 `AkbotEvidence | null`：
+ *   熔断打开（429 保护期）和限流放弃这两种情况下，我们其实**没得出结论**，
+ *   但如果都返回 null，上游无法把它和「扫完了，确实不是 akbot 用户」区分开，
+ *   于是这些地址被当成「已排除」静默丢弃，且永不复查 —— 熔断 30s 窗口内
+ *   密集 block 的场景会成片漏检。
+ *
+ * 判定规则：
+ *   found        —— 扫完了，命中
+ *   clean        —— 扫完了，确实没有 AKBot 痕迹（可以不再查这个地址）
+ *   inconclusive —— 没扫完（熔断 / 429 / 参数非法），需要稍后重试
+ */
+export type AkbotCheckResult =
+  | { status: 'found'; evidence: AkbotEvidence }
+  | { status: 'clean' }
+  | { status: 'inconclusive'; reason: string };
+
+/**
  * 扫描一个地址最近 N 笔签名（分页），找最近一笔调用 AKBot 合约的 tx。
  *
  * 参数：
  *   maxPages  默认 5（= 最多 5000 笔签名）；活跃地址够用，老 tx 靠后续实时 hook 补
  *   pageSize  默认 1000
  *
- * 返回：第一笔（newest-first）命中的证据；找不到返回 null
+ * 返回：AkbotCheckResult —— 用 status 区分「命中 / 干净 / 没结论」
  *
  * 用法：
  *   - 默认（5000 签名）—— 适合一次性回填
@@ -66,7 +85,7 @@ export interface AkbotEvidence {
 export function scanAddressForAkbot(
   address: string,
   opts: { maxPages?: number; pageSize?: number } = {},
-): Promise<AkbotEvidence | null> {
+): Promise<AkbotCheckResult> {
   return scanAddressForAkbotCore(address, opts);
 }
 
@@ -76,9 +95,9 @@ export function scanAddressForAkbot(
  * 200 笔签名 ≈ 活跃地址最近 1-3 天，对实时识别 akbot 用户已足够；
  * 未命中的地址会再次进入监控时再扫，或交给 scripts/backfill-akbot.ts 全量兜底。
  *
- * 命中即返回；不命中返回 null
+ * 命中即返回 found；扫完没命中返回 clean；熔断/限流返回 inconclusive
  */
-export function quickAkbotCheck(address: string): Promise<AkbotEvidence | null> {
+export function quickAkbotCheck(address: string): Promise<AkbotCheckResult> {
   return scanAddressForAkbotCore(address, { maxPages: 1, pageSize: 200 });
 }
 
@@ -92,8 +111,10 @@ export function quickAkbotCheck(address: string): Promise<AkbotEvidence | null> 
  *
  * 两道闸：
  *   1) 并发上限 —— 同时最多 MAX_CONCURRENT_SCANS 条链，其余排队（而不是一起冲出去）
- *   2) 429 熔断 —— 命中一次 429 就全局暂停 BREAK_AFTER_429_MS，期间直接返回 null，
- *      不再打 Helius；下一轮监控自然会重试未命中的地址
+ *   2) 429 熔断 —— 命中一次 429 就全局暂停 BREAK_AFTER_429_MS，期间直接返回
+ *      inconclusive，不再打 Helius。注意「下一轮监控自然会重试」原本不成立：
+ *      每轮监控拿到的是该 block 的新买家，被熔断吞掉的旧地址不会再进这个列表。
+ *      所以重试责任交给调用方（见 monitor.ts 的 akbotRetryQueue）。
  */
 const MAX_CONCURRENT_SCANS = 2;
 const BREAK_AFTER_429_MS = 30_000;
@@ -104,6 +125,15 @@ const queue: Array<() => void> = [];
 
 function isCircuitOpen(): boolean {
   return Date.now() < circuitOpenUntil;
+}
+
+/**
+ * 给 monitor 的重试队列用：让它能在排队前先判断「现在还值不值得打 Helius」。
+ * 队列里存的是已经因为熔断而 inconclusive 的地址，重试前先问一句，
+ * 免得刚熔断完又被拖进一轮注定失败的扫描。
+ */
+export function isAkbotCircuitOpen(): boolean {
+  return isCircuitOpen();
 }
 
 function tripCircuit(): void {
@@ -135,11 +165,14 @@ function releaseScanSlot(): void {
 async function scanAddressForAkbotCore(
   address: string,
   opts: { maxPages?: number; pageSize?: number },
-): Promise<AkbotEvidence | null> {
+): Promise<AkbotCheckResult> {
   // 防御：空地址 / 太短地址直接返回，避免打到 Helius 报错
-  if (!address || typeof address !== 'string' || address.length < 32) return null;
-  // 熔断期内直接放弃：本次不下结论，交给下一轮监控重试
-  if (isCircuitOpen()) return null;
+  if (!address || typeof address !== 'string' || address.length < 32) {
+    return { status: 'inconclusive', reason: 'invalid address' };
+  }
+  // 熔断期内直接放弃：本次不下结论。返回 inconclusive 而不是 null，
+  // 好让调用方把这个地址放进重试队列，而不是当成「已排除」丢掉。
+  if (isCircuitOpen()) return { status: 'inconclusive', reason: 'circuit open' };
 
   await acquireScanSlot();
   try {
@@ -152,7 +185,7 @@ async function scanAddressForAkbotCore(
 async function doScanAddressForAkbot(
   address: string,
   opts: { maxPages?: number; pageSize?: number },
-): Promise<AkbotEvidence | null> {
+): Promise<AkbotCheckResult> {
   const helius = getHelius();
   const rpc = getMultiRpc();
   const pageSize = Math.min(opts.pageSize ?? 1000, 1000); // 上限保护
@@ -176,9 +209,11 @@ async function doScanAddressForAkbot(
     if (batch.length < pageSize) break;
     before = batch[batch.length - 1].signature;
   }
-  if (allSigs.length === 0) return null;
+  // 签名拉取本身失败会抛到调用方；拉回来 0 条是「这个地址链上没交易」，属确定结论。
+  if (allSigs.length === 0) return { status: 'clean' };
 
   // 2) 分批解析（Helius 一次最多 ~100 笔更稳）
+  let sawParseFailure = false;
   for (let i = 0; i < allSigs.length; i += 100) {
     const slice = allSigs.slice(i, i + 100).map((s) => s.signature);
     try {
@@ -186,9 +221,12 @@ async function doScanAddressForAkbot(
       for (const tx of enhancedList) {
         if (isAkbotTx(tx)) {
           return {
-            signature: tx.signature,
-            blockTime: tx.blockTime,
-            slot: tx.slot,
+            status: 'found',
+            evidence: {
+              signature: tx.signature,
+              blockTime: tx.blockTime,
+              slot: tx.slot,
+            },
           };
         }
       }
@@ -198,11 +236,15 @@ async function doScanAddressForAkbot(
         // 429 之后继续打下一批只会接着 429：既白烧配额又加深堆积。
         // 直接放弃这个地址剩下的批，熔断交给外层的闸门处理。
         tripCircuit();
-        return null;
+        // 剩余批次没扫完 → 不是「干净」，得让调用方重试
+        return { status: 'inconclusive', reason: 'rate limited (429)' };
       }
-      // 单批解析失败不影响下一批；最后没找到自然返回 null
+      // 单批解析失败不影响下一批，但这一批确实没结论，要记下来
+      sawParseFailure = true;
       console.warn('[akbot] parseTransactions batch failed:', (err as Error).message);
     }
   }
-  return null;
+  // 有批次解析失败 → 这批签名没被检查过，不能宣布「干净」
+  if (sawParseFailure) return { status: 'inconclusive', reason: 'batch parse failed' };
+  return { status: 'clean' };
 }

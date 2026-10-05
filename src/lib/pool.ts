@@ -54,33 +54,47 @@ export interface PoolMember {
 }
 
 /**
- * 把一个池子成员标记为 AKBot 用户。幂等：已经是 true 就不动 evidence。
+ * 把一个地址标记为 AKBot 用户。幂等：已经是 true 就不动 evidence。
  * - 证据签名/时间以「最早」写入的那笔为准，避免后到的覆盖前面的
- * - 注意只写 UPDATE，不做 SELECT，调用方拿不到影响的行数
+ * - 返回 true 表示这行确实被写成了 is_akbot=true（新增或翻转）；false 表示
+ *   参数非法或该地址本来就是 true
+ *
+ * 为什么是 upsert 而不是 UPDATE：
+ *   实时检测的对象是「这个 block 里刚出现的新买家」，它们绝大多数还没被
+ *   scanForTarget 写进 pool_members。原来的纯 UPDATE 在这种地址上影响 0 行，
+ *   既不报错也无返回值，调用方照样打 "akbot detected" 日志 —— 命中率静默归零。
+ *   改成 ON CONFLICT DO UPDATE 后，池外地址也能落标记。
  */
 export async function markAsAkbot(
   address: string,
   evidenceSig: string,
   blockTime: number | null | undefined,
   slot: number | null | undefined,
-): Promise<void> {
+): Promise<boolean> {
   // evidence sig 必须是字符串（且非空）
-  if (!address || !evidenceSig) return;
+  if (!address || !evidenceSig) return false;
   const detectedAt =
     typeof blockTime === 'number' && blockTime > 0
       ? new Date(blockTime * 1000).toISOString()
       : new Date().toISOString();
   const slotValue = typeof slot === 'number' ? slot : null;
-  await query(
-    `UPDATE pool_members
+  // 冲突分支的 WHERE is_akbot = FALSE 让「本来就是 true」的行走不到 DO UPDATE，
+  // 于是 RETURNING 不会有行 —— 调用方据此跳过重复检测和重复日志。
+  // 证据字段用 pool_members.<col> 取旧值、EXCLUDED.<col> 取新值，别写反。
+  const rows = await query<{ is_akbot: boolean }>(
+    `INSERT INTO pool_members (address, role, is_akbot, akbot_detected_at, akbot_evidence_sig, akbot_evidence_slot)
+     VALUES ($1, 'follower', TRUE, $2::timestamptz, $3, $4)
+     ON CONFLICT (address) DO UPDATE
         SET is_akbot = TRUE,
-            akbot_detected_at = COALESCE(akbot_detected_at, $2::timestamptz),
-            akbot_evidence_sig = COALESCE(akbot_evidence_sig, $3),
-            akbot_evidence_slot = COALESCE(akbot_evidence_slot, $4)
-      WHERE address = $1
-        AND is_akbot = FALSE`,
+            akbot_detected_at = COALESCE(pool_members.akbot_detected_at, EXCLUDED.akbot_detected_at),
+            akbot_evidence_sig = COALESCE(pool_members.akbot_evidence_sig, EXCLUDED.akbot_evidence_sig),
+            akbot_evidence_slot = COALESCE(pool_members.akbot_evidence_slot, EXCLUDED.akbot_evidence_slot),
+            updated_at = NOW()
+      WHERE pool_members.is_akbot = FALSE
+     RETURNING is_akbot`,
     [address, detectedAt, evidenceSig, slotValue],
   );
+  return rows.length > 0;
 }
 
 export interface PoolEdge {

@@ -52,18 +52,27 @@ async function main() {
   let scanned = 0;
   let detected = 0;
   let failed = 0;
+  let skipped = 0; // 熔断/限流导致没扫完的地址 —— 下一轮 LIMIT 更大时自然覆盖到
   const t0 = Date.now();
 
   for (const c of candidates) {
     scanned++;
     try {
-      const ev = await scanAddressForAkbot(c.address);
-      if (ev) {
+      const res = await scanAddressForAkbot(c.address);
+      if (res.status === 'found') {
+        const ev = res.evidence;
         await markAsAkbot(c.address, ev.signature, ev.blockTime, ev.slot);
         detected++;
         console.log(
           `  [${scanned}/${candidates.length}] HIT  ${c.address.slice(0, 8)}…${c.address.slice(-4)} ` +
           `(freq=${c.freq}) evidence=${ev.signature.slice(0, 12)}…`,
+        );
+      } else if (res.status === 'inconclusive') {
+        // 关键：不能把「没扫完」当成「不是 akbot」。这类地址不写任何标记，
+        // 下次跑（WHERE is_akbot = FALSE 会重新捞到它）再扫一遍。
+        skipped++;
+        console.warn(
+          `  [${scanned}/${candidates.length}] SKIP ${c.address.slice(0, 8)}… (${res.reason})`,
         );
       } else {
         process.stdout.write(
@@ -81,8 +90,13 @@ async function main() {
 
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
   console.log(
-    `\n\n[backfill-akbot] done in ${elapsed}s — scanned=${scanned} detected=${detected} failed=${failed}`,
+    `\n\n[backfill-akbot] done in ${elapsed}s — scanned=${scanned} detected=${detected} failed=${failed} skipped=${skipped}`,
   );
+  if (skipped > 0) {
+    console.log(
+      `[backfill-akbot] 注意：${skipped} 个地址因限流/熔断未扫完，重跑本脚本（增大 LIMIT）会重新扫它们。`,
+    );
+  }
 
   // 顺手打一下当前 AKBot 总数
   const total = await query<{ c: string }>(
