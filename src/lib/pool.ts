@@ -140,6 +140,7 @@ export async function scanForTarget(opts: {
   // 用 (slot, mint) 一次性取所有块内买家
   const buyerRows = await query<any>(`
     SELECT bb.address, bb.slot, bb.slot_offset, bb.block_index,
+           bb.is_first_sniper, bb.is_own,
            bb.buy_sol::text, bb.tip_sol::text, bb.prio_lamports,
            bb.result, bb.signature,
            ba.mint, ba.target_signature
@@ -180,12 +181,16 @@ export async function scanForTarget(opts: {
   }>();
 
   for (const b of buyerRows) {
-    // 跳过 own（block_buyers.is_own = true，但 JOIN 里没取这个字段，靠 owner set 过滤）
-    if (b.address === opts.targetAddress) continue;
+    // 跳过 own：自己的钱包不是「跟随者」，不该进池子。
+    // 原来只有 <address <> targetAddress> 这一个过滤条件，只排掉了目标本身，
+    // own_wallets 里其它地址仍然会被当成 follower 累加进 freq / seen_as_follower。
+    if (b.is_own || b.address === opts.targetAddress) continue;
 
-    // slot_offset=0 表示同 slot（同 block），为 first_sniper
-    // slot_offset=1 表示下一个 slot，为 follower
-    const realRole: 'first_sniper' | 'follower' = b.slot_offset === 0 ? 'first_sniper' : 'follower';
+    // 角色以 block_buyers 已落库的 mark 为准（由 first-sniper.ts analyzeBlock 打标）：
+    //   is_first_sniper = 同 slot 内、且在目标之前的**第一笔**买入，每笔目标交易有且仅有一个。
+    // 不能用 slot_offset 判首狙：slot_offset=0 只说明「同 slot」，而同 slot 里排在目标之后的
+    // 买家其实是跟随者，把它们算成 first_sniper 会让首狙计数被同 slot 的跟风盘灌水。
+    const realRole: 'first_sniper' | 'follower' = b.is_first_sniper ? 'first_sniper' : 'follower';
 
     let m = memberAgg.get(b.address);
     if (!m) {
@@ -204,6 +209,10 @@ export async function scanForTarget(opts: {
     }
     m.freq++;
     if (realRole === 'first_sniper') m.seen_as_first_sniper++; else m.seen_as_follower++;
+    // 同上：role 跟着计数走。本批里先出现跟随、后出现首狙的地址，初始 role 是 follower，
+    // 不重新派生的话它会以 follower 身份入库。
+    m.role = m.seen_as_first_sniper > 0 && m.seen_as_follower > 0 ? 'both'
+      : m.seen_as_first_sniper > 0 ? 'first_sniper' : 'follower';
     m.distinctTargets.add(opts.targetAddress);
     m.mints.add(b.mint);
     const bs = parseFloat(b.buy_sol);
@@ -267,8 +276,6 @@ export async function scanForTarget(opts: {
       );
       newMembers++;
     } else {
-      const mergedRole = cur.role === m.role ? cur.role :
-        (cur.role === 'first_sniper' || m.role === 'first_sniper') ? 'both' : 'follower';
       const mergedTargets = Array.from(new Set([
         ...(cur.target_addresses ?? []),
         ...Array.from(m.distinctTargets),
@@ -281,6 +288,11 @@ export async function scanForTarget(opts: {
       const newFreq = Number(cur.freq ?? 0) + m.freq;
       const newFirstSniper = Number(cur.seen_as_first_sniper ?? 0) + m.seen_as_first_sniper;
       const newFollower = Number(cur.seen_as_follower ?? 0) + m.seen_as_follower;
+      // role 从计数派生。不要写成「cur.role / m.role 里有没有 first_sniper」：
+      // m.role 只是本批第一条记录碰巧的角色，同一批里既当首狙又当跟随者的地址会被漏判成 follower。
+      const mergedRole: 'first_sniper' | 'follower' | 'both' =
+        newFirstSniper > 0 && newFollower > 0 ? 'both'
+          : newFirstSniper > 0 ? 'first_sniper' : 'follower';
       const prevBuySolSum = (parseFloat(cur.avg_buy_sol ?? '0') * Number(cur.freq ?? 0)) + m.buySolSum;
       const newAvgBuySol = prevBuySolSum / Math.max(newFreq, 1);
 

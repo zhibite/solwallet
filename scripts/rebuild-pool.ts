@@ -2,8 +2,12 @@
 // 清空 pool_members / pool_edges（被 BIGINT 字符串拼接 bug 污染），
 // 然后基于当前 monitored_targets + target_trades 重跑 BFS 重算。
 //
+// 注意：必须同时把 monitored_targets.last_scanned_block_time 重置为 NULL。
+// scanForTarget 只扫 block_time > 水位线 的 trade，而水位线每次扫描后被推到
+// MAX(block_time)，所以不重置的话 TRUNCATE 之后 BFS 一笔都扫不到，池子会被清空且无法重建。
+//
 // Usage: npx tsx --env-file=.env scripts/rebuild-pool.ts
-import { query, queryOne, pool } from '../src/lib/db';
+import { query, queryOne, withTransaction, pool } from '../src/lib/db';
 import { runBFS } from '../src/lib/pool';
 
 async function main() {
@@ -13,13 +17,19 @@ async function main() {
   const before = await queryOne<any>(`
     SELECT
       (SELECT COUNT(*)::int FROM pool_members) AS pm,
-      (SELECT COUNT(*)::int FROM pool_edges) AS pe
+      (SELECT COUNT(*)::int FROM pool_edges) AS pe,
+      (SELECT COUNT(*)::int FROM monitored_targets WHERE last_scanned_block_time IS NOT NULL) AS wm_set
   `);
-  console.log(`清理前 pool_members=${before?.pm} pool_edges=${before?.pe}`);
+  console.log(
+    `清理前 pool_members=${before?.pm} pool_edges=${before?.pe} 已设水位线目标数=${before?.wm_set}`,
+  );
 
-  // 2) 清空（保留表结构）
-  console.log('\n[1/3] TRUNCATE pool_members / pool_edges');
-  await query('TRUNCATE TABLE pool_members, pool_edges RESTART IDENTITY');
+  // 2) 清空 + 重置水位线（同一事务，避免 truncate 后崩溃留下不一致状态）
+  console.log('\n[1/3] TRUNCATE pool_members / pool_edges + 重置 last_scanned_block_time');
+  await withTransaction(async (client) => {
+    await client.query('TRUNCATE TABLE pool_members, pool_edges RESTART IDENTITY');
+    await client.query('UPDATE monitored_targets SET last_scanned_block_time = NULL');
+  });
 
   // 3) 取 monitored_targets 数量
   const targets = await query<any>(`SELECT id, address FROM monitored_targets`);
