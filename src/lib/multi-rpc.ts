@@ -267,8 +267,13 @@ export class MultiFreeRpc {
     return this.rpc('getTransaction', [sig, { maxSupportedTransactionVersion: 1 }], 5 * 60_000);
   }
 
-  async getSignaturesForAddress(address: string, limit = 100): Promise<any[]> {
-    return this.rpc('getSignaturesForAddress', [address, { limit }], 5_000);
+  async getSignaturesForAddress(address: string, limit = 100, before?: string): Promise<any[]> {
+    // before 要透传进 options，否则调用方分页时每一页都拉回同一批最新签名
+    return this.rpc(
+      'getSignaturesForAddress',
+      [address, { limit, ...(before ? { before } : {}) }],
+      5_000,
+    );
   }
 }
 

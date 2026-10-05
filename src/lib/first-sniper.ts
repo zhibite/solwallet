@@ -250,49 +250,41 @@ export async function saveBlockAnalysis(
   const { withTransaction } = await import('./db');
   return withTransaction(async (client) => {
     // upsert block_analyses（含 target_block_index / counts）
-    const existing = await client.query(
-      'SELECT id FROM block_analyses WHERE slot = $1 AND mint = $2',
-      [slot, mint],
+    //
+    // 用 INSERT ... ON CONFLICT 一条语句完成，不要退回「先 SELECT 再 INSERT」：
+    // 那样两个并发的 analyzeBlock 打到同一个 (slot, mint) 时会双双查到「不存在」，
+    // 然后其中一个 INSERT 撞上 block_analyses_slot_mint_key 报 23505，
+    // 整笔分析（含后面所有 block_buyers）一起回滚。并发时确实踩到过：
+    //   键值"(slot, mint)=(453243779, DaUFkgZj…)" 已经存在
+    //
+    // ON CONFLICT DO UPDATE 在冲突行已存在时 RETURNING 会返回那一行的 id，
+    // 所以「首次插入」和「覆盖已有分析」两条路径拿到的 analysisId 语义一致。
+    const upserted = await client.query(
+      `INSERT INTO block_analyses (
+         slot, mint, target_signature, block_time,
+         target_block_index, same_slot_count, next_slot_count
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (slot, mint) DO UPDATE SET
+         target_signature   = EXCLUDED.target_signature,
+         block_time         = EXCLUDED.block_time,
+         target_block_index = EXCLUDED.target_block_index,
+         same_slot_count    = EXCLUDED.same_slot_count,
+         next_slot_count    = EXCLUDED.next_slot_count
+       RETURNING id`,
+      [
+        slot,
+        mint,
+        targetSig,
+        blockTime,
+        result.targetBlockIndex,
+        result.sameSlotCount,
+        result.nextSlotCount,
+      ],
     );
-    let analysisId: number;
-    if (existing.rowCount && existing.rowCount > 0) {
-      analysisId = existing.rows[0].id;
-      await client.query('DELETE FROM block_buyers WHERE block_analysis_id = $1', [analysisId]);
-      await client.query(
-        `UPDATE block_analyses
-           SET target_signature = $2,
-               block_time = $3,
-               target_block_index = $4,
-               same_slot_count = $5,
-               next_slot_count = $6
-         WHERE id = $1`,
-        [
-          analysisId,
-          targetSig,
-          blockTime,
-          result.targetBlockIndex,
-          result.sameSlotCount,
-          result.nextSlotCount,
-        ],
-      );
-    } else {
-      const ins = await client.query(
-        `INSERT INTO block_analyses (
-           slot, mint, target_signature, block_time,
-           target_block_index, same_slot_count, next_slot_count
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-        [
-          slot,
-          mint,
-          targetSig,
-          blockTime,
-          result.targetBlockIndex,
-          result.sameSlotCount,
-          result.nextSlotCount,
-        ],
-      );
-      analysisId = ins.rows[0].id;
-    }
+    const analysisId: number = upserted.rows[0].id;
+
+    // 买家明细整体重写（upsert 主记录之后无条件清空再插）
+    await client.query('DELETE FROM block_buyers WHERE block_analysis_id = $1', [analysisId]);
 
     // 插入每个 buyer
     // bundle_size 统计：先插完所有 buyer，再统一回填（按 bundle_id 聚合）

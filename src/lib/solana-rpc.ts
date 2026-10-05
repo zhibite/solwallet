@@ -74,8 +74,12 @@ class SolanaRPC {
     return this.rpc('getTransaction', [signature, { maxSupportedTransactionVersion: 1 }], 5 * 60_000);
   }
 
-  async getSignaturesForAddress(address: string, limit = 100): Promise<any[]> {
-    return this.rpc('getSignaturesForAddress', [address, { limit }], 5_000);
+  async getSignaturesForAddress(address: string, limit = 100, before?: string): Promise<any[]> {
+    return this.rpc(
+      'getSignaturesForAddress',
+      [address, { limit, ...(before ? { before } : {}) }],
+      5_000,
+    );
   }
 
   async getSlot(): Promise<number> {

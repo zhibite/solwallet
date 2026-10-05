@@ -82,13 +82,77 @@ export function quickAkbotCheck(address: string): Promise<AkbotEvidence | null> 
   return scanAddressForAkbotCore(address, { maxPages: 1, pageSize: 200 });
 }
 
+/**
+ * Helius 并发闸门 + 429 熔断
+ *
+ * 为什么需要：监控侧用 setImmediate fire-and-forget 触发扫描，没有任何背压。
+ * block 密集时会同时叠出几十条扫描链，每条链按 100 笔一批打 Helius，结果就是配额
+ * 被打爆（429），而在途的 promise 和 axios 错误对象（带 request/response 引用）会
+ * 持续堆积 —— 这是 dev server 堆涨到 8GB 溢出的直接原因。
+ *
+ * 两道闸：
+ *   1) 并发上限 —— 同时最多 MAX_CONCURRENT_SCANS 条链，其余排队（而不是一起冲出去）
+ *   2) 429 熔断 —— 命中一次 429 就全局暂停 BREAK_AFTER_429_MS，期间直接返回 null，
+ *      不再打 Helius；下一轮监控自然会重试未命中的地址
+ */
+const MAX_CONCURRENT_SCANS = 2;
+const BREAK_AFTER_429_MS = 30_000;
+
+let inFlight = 0;
+let circuitOpenUntil = 0;
+const queue: Array<() => void> = [];
+
+function isCircuitOpen(): boolean {
+  return Date.now() < circuitOpenUntil;
+}
+
+function tripCircuit(): void {
+  const until = Date.now() + BREAK_AFTER_429_MS;
+  // 只延后不提前关断，避免并发的多条链把熔断窗口互相顶掉
+  if (until > circuitOpenUntil) circuitOpenUntil = until;
+  console.warn(`[akbot] Helius 429，熔断 ${BREAK_AFTER_429_MS / 1000}s`);
+}
+
+async function acquireScanSlot(): Promise<void> {
+  if (inFlight < MAX_CONCURRENT_SCANS) {
+    inFlight++;
+    return;
+  }
+  // 满了就排队。名额由 releaseScanSlot 直接移交给这里，所以醒来后不再自增 ——
+  // 否则 release 的 inFlight-- 与新调用者之间会有个窗口，被抢走名额后导致超发。
+  await new Promise<void>((resolve) => queue.push(resolve));
+}
+
+function releaseScanSlot(): void {
+  const next = queue.shift();
+  if (next) {
+    next(); // 槽位移交，inFlight 保持不变
+  } else {
+    inFlight--;
+  }
+}
+
 async function scanAddressForAkbotCore(
   address: string,
   opts: { maxPages?: number; pageSize?: number },
 ): Promise<AkbotEvidence | null> {
   // 防御：空地址 / 太短地址直接返回，避免打到 Helius 报错
   if (!address || typeof address !== 'string' || address.length < 32) return null;
+  // 熔断期内直接放弃：本次不下结论，交给下一轮监控重试
+  if (isCircuitOpen()) return null;
 
+  await acquireScanSlot();
+  try {
+    return await doScanAddressForAkbot(address, opts);
+  } finally {
+    releaseScanSlot();
+  }
+}
+
+async function doScanAddressForAkbot(
+  address: string,
+  opts: { maxPages?: number; pageSize?: number },
+): Promise<AkbotEvidence | null> {
   const helius = getHelius();
   const rpc = getMultiRpc();
   const pageSize = Math.min(opts.pageSize ?? 1000, 1000); // 上限保护
@@ -96,13 +160,19 @@ async function scanAddressForAkbotCore(
 
   // 1) 分页拉签名（newest-first）—— 公开 RPC，走多源轮询省 Helius 配额
   const allSigs: Array<{ signature: string }> = [];
+  const seenSigs = new Set<string>();
   let before: string | undefined;
   for (let i = 0; i < maxPages; i++) {
-    // solana-web3.js 的 before 参数：list element 形状里 .signature 是字符串；
-    // 我们的多源 wrapper 走 Connection.getSignaturesForAddress(pk, { limit, before }) 即可。
-    const batch = await rpc.getSignaturesForAddress(address, pageSize);
+    // before 必须真的传下去：漏传的话每一页都拉回同一批「最新 pageSize 条」，
+    // 白跑 maxPages-1 次 RPC，还让后面的 Helius 批量解析对着同一批签名重复打 5 遍，
+    // 极易把自己打进 429。seenSigs 再兜一层，防止分页边界重叠。
+    const batch = await rpc.getSignaturesForAddress(address, pageSize, before);
     if (!batch || batch.length === 0) break;
-    allSigs.push(...batch);
+    for (const s of batch) {
+      if (seenSigs.has(s.signature)) continue;
+      seenSigs.add(s.signature);
+      allSigs.push(s);
+    }
     if (batch.length < pageSize) break;
     before = batch[batch.length - 1].signature;
   }
@@ -123,6 +193,13 @@ async function scanAddressForAkbotCore(
         }
       }
     } catch (err) {
+      const status = (err as { response?: { status?: number } })?.response?.status;
+      if (status === 429) {
+        // 429 之后继续打下一批只会接着 429：既白烧配额又加深堆积。
+        // 直接放弃这个地址剩下的批，熔断交给外层的闸门处理。
+        tripCircuit();
+        return null;
+      }
       // 单批解析失败不影响下一批；最后没找到自然返回 null
       console.warn('[akbot] parseTransactions batch failed:', (err as Error).message);
     }
