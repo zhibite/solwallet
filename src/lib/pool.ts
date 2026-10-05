@@ -380,6 +380,7 @@ export async function autoPromote(opts: {
   const defaultThreshold = opts.defaultThreshold ?? PROMOTE_DEFAULT_THRESHOLD;
 
   // 候选: freq >= 阈值 且 distinct_targets >= 阈值 且未被晋升 且不在 monitored_targets
+  // 且未被人工删除标记排除（auto_promote_excluded，见 0009 迁移）
   const candidates = await query<any>(`
     SELECT pm.address, pm.freq, pm.role
     FROM pool_members pm
@@ -388,6 +389,7 @@ export async function autoPromote(opts: {
       AND pm.distinct_targets >= $2
       AND pm.promoted_to_target = false
       AND mt.id IS NULL
+      AND pm.auto_promote_excluded = false
     ORDER BY pm.freq DESC
     LIMIT 50
   `, [freqThreshold, distinctTargetsThreshold]);
@@ -395,12 +397,19 @@ export async function autoPromote(opts: {
   const promoted: string[] = [];
   for (const c of candidates) {
     try {
-      await query(
+      // RETURNING 判断是否真的插入了新行。候选查询已保证 mt.id IS NULL，
+      // 这里返回空只可能是并发下被另一个 worker 先插了 —— 那就不重复标记。
+      const inserted = await query<{ id: string }>(
         `INSERT INTO monitored_targets (address, label, threshold_sol, status)
          VALUES ($1, $2, $3, 'active')
-         ON CONFLICT (address) DO NOTHING`,
+         ON CONFLICT (address) DO NOTHING
+         RETURNING id`,
         [c.address, `auto:${c.role}`, defaultThreshold],
       );
+      if (inserted.length === 0) {
+        console.log(`[pool] skip ${c.address.slice(0, 6)}... already a target (concurrent insert)`);
+        continue;
+      }
       await query(
         `UPDATE pool_members SET promoted_to_target = true, promoted_at = NOW() WHERE address = $1`,
         [c.address],
@@ -624,19 +633,94 @@ export async function addPoolMember(address: string, label?: string): Promise<Po
 export async function promotePoolMember(address: string, threshold?: number): Promise<{ ok: boolean; reason?: string }> {
   const m = await getPoolMember(address);
   if (!m) return { ok: false, reason: 'pool member not found' };
-  if (m.promoted_to_target) return { ok: false, reason: 'already promoted' };
 
-  await query(
+  // 标记为已晋升、但 monitored_targets 里没有对应行时（历史遗留的孤儿状态），
+  // 要允许重新晋升，而不是被 promoted_to_target 直接挡回去。
+  const existing = await queryOne<{ id: string }>(
+    `SELECT id FROM monitored_targets WHERE address = $1`,
+    [address],
+  );
+  if (existing) return { ok: false, reason: 'already a monitored target' };
+
+  // 手动晋升是显式意图，清掉「人工删除后不要自动拉回」的标记
+  await query(`UPDATE pool_members SET auto_promote_excluded = false WHERE address = $1`, [address]);
+
+  const inserted = await query<{ id: string }>(
     `INSERT INTO monitored_targets (address, label, threshold_sol, status)
      VALUES ($1, $2, $3, 'active')
-     ON CONFLICT (address) DO NOTHING`,
+     ON CONFLICT (address) DO NOTHING
+     RETURNING id`,
     [address, m.label ?? `pool:${m.role}`, threshold ?? PROMOTE_DEFAULT_THRESHOLD],
   );
+  if (inserted.length === 0) return { ok: false, reason: 'already a monitored target' };
+
   await query(
     `UPDATE pool_members SET promoted_to_target = true, promoted_at = NOW() WHERE address = $1`,
     [address],
   );
   return { ok: true };
+}
+
+/**
+ * 对账：清理 pool_members.promoted_to_target 的孤儿状态。
+ *
+ * promoted_to_target 的语义是「这个池成员被池子系统晋升进过 monitored_targets」，
+ * 而不是「当前是 monitored_targets 里的一行」。手动添加的监控目标若同时也在池子里，
+ * promoted_to_target = false 是正常状态，不能当成漂移去改。
+ *
+ * 真正的漂移只有一类：标记为 true，但 monitored_targets 里已没有对应的 active 行。
+ * 旧的删除接口只删 monitored_targets、不重置这个标记，于是该地址既不被监控，
+ * 也过不了 autoPromote 的候选条件（promoted_to_target = false 不成立、
+ * mt.id IS NULL 成立），永久卡死。
+ *
+ * 不在 pool-worker 里自动调用：修复会让这些地址重新具备被自动晋升的资格
+ * （进而真实抢单、花 SOL），需人工确认后再跑 scripts/reconcile-promotion.ts。
+ */
+export async function reconcilePromotionFlags(opts: {
+  /** 孤儿处置方式：exclude = 置排除标记（默认，尊重人工删除）；requeue = 放回候选池 */
+  orphanAction?: 'exclude' | 'requeue';
+  dryRun?: boolean;
+} = {}): Promise<{
+  orphans: { address: string; role: string; freq: number; promoted_at: string | null }[];
+  fixed: number;
+}> {
+  const orphanAction = opts.orphanAction ?? 'exclude';
+  const dryRun = opts.dryRun ?? false;
+
+  const orphans = await query<any>(`
+    SELECT pm.address, pm.role, pm.freq, pm.promoted_at
+    FROM pool_members pm
+    WHERE pm.promoted_to_target = true
+      AND NOT EXISTS (
+        SELECT 1 FROM monitored_targets mt
+        WHERE mt.address = pm.address AND mt.status = 'active'
+      )
+    ORDER BY pm.freq DESC
+  `);
+
+  if (dryRun) return { orphans, fixed: 0 };
+
+  const fixed = orphanAction === 'exclude'
+    ? await execute(`
+        UPDATE pool_members
+        SET promoted_to_target = false, promoted_at = NULL, auto_promote_excluded = true
+        WHERE promoted_to_target = true
+          AND NOT EXISTS (
+            SELECT 1 FROM monitored_targets mt
+            WHERE mt.address = pool_members.address AND mt.status = 'active'
+          )
+      `)
+    : await execute(`
+        UPDATE pool_members
+        SET promoted_to_target = false, promoted_at = NULL
+        WHERE promoted_to_target = true
+          AND NOT EXISTS (
+            SELECT 1 FROM monitored_targets mt
+            WHERE mt.address = pool_members.address AND mt.status = 'active'
+          )
+      `);
+
+  return { orphans, fixed };
 }
 
 /** 池子统计 */
