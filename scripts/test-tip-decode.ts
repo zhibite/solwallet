@@ -47,7 +47,7 @@ async function main() {
     // 1) Helius Enhanced（如果 429 就跳过）
     let heliusTip = 0, heliusPrio = 0;
     try {
-      const enhanced = await getHelius().parseTransaction(sniperSig);
+      const enhanced = await getHelius().parseEvent(sniperSig);
       if (enhanced) {
         heliusTip = parseFloat(enhanced.tipSol ?? '0');
         heliusPrio = enhanced.prioLamports ?? 0;

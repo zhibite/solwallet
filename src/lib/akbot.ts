@@ -17,12 +17,53 @@
  *   未来如果要支持"取消标记"，需要人工 + Solscan 复核，不要靠脚本自动清。
  */
 
-import { getHelius } from './helius';
 import { getMultiRpc } from './multi-rpc';
 import type { HeliusEnhancedTx } from './types';
 
 /** AKBot 卖币合约地址（所有 akbot 用户 sell 都走这个 program） */
 export const AKBOT_PROGRAM = 'AKbotMAGJmYPwV8z55Lqiqgijt2KcjLeFGue5sw1noHM';
+
+/**
+ * 检查一笔原始 RPC tx（json 编码，含 meta.innerInstructions）是否调用过 AKBot 程序。
+ *
+ * 不需要把整笔 tx 适配成 Helius 形状 —— akbot 判定的全部信号就是「顶层 / 内层
+ * 任意一条指令的 programId 等于 AKBOT_PROGRAM」。直接走 meta.innerInstructions 即可，
+ * 避免走 solanaTxToHeliusEnhanced 的 token balance 计算 / 余额差法等 akbot 用不上的开销。
+ *
+ * 返回 true 即为 akbot 命中（被调用方写入 is_akbot=true）；返回 false 表示当前 tx 没痕迹，
+ * 需继续扫下一页；抛错由调用方捕获。
+ */
+export function isAkbotTxFromRpc(tx: any): boolean {
+  if (!tx || !tx.transaction) return false;
+  // 顶层指令
+  const topIxList = (tx.transaction.message?.instructions ?? []) as any[];
+  for (const ix of topIxList) {
+    const pid = resolveProgramId(ix, tx.transaction.message);
+    if (pid === AKBOT_PROGRAM) return true;
+  }
+  // 内层指令（akbot 实际是被 Jupiter/CPMM 在 CPI 里调用，必走 inner）
+  const inner = (tx.meta?.innerInstructions ?? []) as any[];
+  for (const innerGroup of inner) {
+    for (const ix of innerGroup.instructions ?? []) {
+      const pid = resolveProgramId(ix, tx.transaction.message);
+      if (pid === AKBOT_PROGRAM) return true;
+    }
+  }
+  return false;
+}
+
+/** 解析一条 compiled instruction 的 programId，处理 string / PublicKey / index 三种形态 */
+function resolveProgramId(ix: any, message: any): string | undefined {
+  if (typeof ix.programId === 'string') return ix.programId;
+  if (ix.programId && typeof ix.programId.toBase58 === 'function') return ix.programId.toBase58();
+  if (typeof ix.programIdIndex === 'number') {
+    const keys = message?.staticAccountKeys ?? message?.accountKeys ?? [];
+    const k = keys[ix.programIdIndex];
+    if (typeof k === 'string') return k;
+    if (k && typeof k.toBase58 === 'function') return k.toBase58();
+  }
+  return undefined;
+}
 
 /**
  * 判断一笔 Helius 增强交易（含 innerInstructions）是否调用了 AKBot 合约
@@ -186,13 +227,14 @@ async function doScanAddressForAkbot(
   address: string,
   opts: { maxPages?: number; pageSize?: number },
 ): Promise<AkbotCheckResult> {
-  const helius = getHelius();
   const rpc = getMultiRpc();
   const pageSize = Math.min(opts.pageSize ?? 1000, 1000); // 上限保护
   const maxPages = Math.min(opts.maxPages ?? 5, 20);        // 上限保护（≤ 20000 sigs）
 
   // 1) 分页拉签名（newest-first）—— 公开 RPC，走多源轮询省 Helius 配额
-  const allSigs: Array<{ signature: string }> = [];
+  //    类型带 blockTime/slot：命中 akbot 时直接用 sig 元数据作 evidence，
+  //    避免再去 getTransaction（省一次 RPC）。
+  const allSigs: Array<{ signature: string; blockTime?: number; slot?: number }> = [];
   const seenSigs = new Set<string>();
   let before: string | undefined;
   for (let i = 0; i < maxPages; i++) {
@@ -204,7 +246,10 @@ async function doScanAddressForAkbot(
     for (const s of batch) {
       if (seenSigs.has(s.signature)) continue;
       seenSigs.add(s.signature);
-      allSigs.push(s);
+      // 适配 multi-rpc 返回的签名项：Helius 风格的字段同时兼容 Solana web3.js 风格
+      const blockTime = (s as any).blockTime ?? (s as any).blockTimeUnix;
+      const slot = (s as any).slot;
+      allSigs.push({ signature: s.signature, blockTime, slot });
     }
     if (batch.length < pageSize) break;
     before = batch[batch.length - 1].signature;
@@ -212,39 +257,45 @@ async function doScanAddressForAkbot(
   // 签名拉取本身失败会抛到调用方；拉回来 0 条是「这个地址链上没交易」，属确定结论。
   if (allSigs.length === 0) return { status: 'clean' };
 
-  // 2) 分批解析（Helius 一次最多 ~100 笔更稳）
+  // 2) 逐签名拉 tx + 检查 programId
+  //    关键变化：原实现走 Helius Enhanced API（100 cr / 100 sigs / 请求），
+  //    现改为走 multi-rpc.getTransaction（public RPC 优先，0 credits；fallback 到 Helius 1 cr）。
+  //    单签名扫描延迟比批量稍高（顺序处理），但 akbot 用例实时性要求不高（结果仅做 is_akbot 标记）。
+  //    同时省掉 100 cr/batch 的开销，单个地址最多 200 sigs → 200 credits（原 400 cr/200 sigs）。
   let sawParseFailure = false;
-  for (let i = 0; i < allSigs.length; i += 100) {
-    const slice = allSigs.slice(i, i + 100).map((s) => s.signature);
+  for (const sigInfo of allSigs) {
     try {
-      const enhancedList = await helius.parseTransactions(slice);
-      for (const tx of enhancedList) {
-        if (isAkbotTx(tx)) {
-          return {
-            status: 'found',
-            evidence: {
-              signature: tx.signature,
-              blockTime: tx.blockTime,
-              slot: tx.slot,
-            },
-          };
-        }
+      const tx = await rpc.getTransaction(sigInfo.signature);
+      if (!tx) continue;
+      if (isAkbotTxFromRpc(tx)) {
+        return {
+          status: 'found',
+          evidence: {
+            signature: sigInfo.signature,
+            blockTime: sigInfo.blockTime ?? tx.blockTime ?? 0,
+            slot: sigInfo.slot ?? tx.slot ?? 0,
+          },
+        };
       }
-    } catch (err) {
-      const status = (err as { response?: { status?: number } })?.response?.status;
-      if (status === 429) {
-        // 429 之后继续打下一批只会接着 429：既白烧配额又加深堆积。
-        // 直接放弃这个地址剩下的批，熔断交给外层的闸门处理。
+    } catch (err: any) {
+      // multi-rpc 已经做了端点轮换 + 自动退避，最后抛出的错误通常不带 axios 风格的
+      // response.status（web3.js 风格的 Error）。用 message 正则兜底，确保「多端点全
+      // 被打满」时仍能触发熔断并返回 inconclusive。
+      const status = err?.response?.status ?? err?.status;
+      const msg = String(err?.message ?? '');
+      const is429 = status === 429 || /\b429\b/.test(msg) || /rate.?limit/i.test(msg);
+      if (is429) {
+        // 429 之后继续打只会接着 429：既白烧配额又加深堆积。
+        // 直接放弃这个地址剩下的签名，熔断交给外层的闸门处理。
         tripCircuit();
-        // 剩余批次没扫完 → 不是「干净」，得让调用方重试
         return { status: 'inconclusive', reason: 'rate limited (429)' };
       }
-      // 单批解析失败不影响下一批，但这一批确实没结论，要记下来
+      // 单笔解析失败不影响下一笔，但这一笔确实没结论，要记下来
       sawParseFailure = true;
-      console.warn('[akbot] parseTransactions batch failed:', (err as Error).message);
+      console.warn('[akbot] getTransaction failed:', (err as Error).message);
     }
   }
-  // 有批次解析失败 → 这批签名没被检查过，不能宣布「干净」
-  if (sawParseFailure) return { status: 'inconclusive', reason: 'batch parse failed' };
+  // 有签名解析失败 → 这部分没被检查过，不能宣布「干净」
+  if (sawParseFailure) return { status: 'inconclusive', reason: 'getTransaction failed' };
   return { status: 'clean' };
 }

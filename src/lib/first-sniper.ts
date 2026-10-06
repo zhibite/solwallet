@@ -5,7 +5,7 @@
  */
 
 import { query, queryOne } from './db';
-import { getHelius } from './helius';
+import { getHelius, parsedEventItemToEnhanced } from './helius';
 import { getRPC } from './solana-rpc';
 import { parseHeliusTx, parseBlockTxs, type ParsedBuy } from './parser';
 import type { BlockBuyer } from './types';
@@ -60,7 +60,7 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
   let targetBuy = await fetchBuyBySig(targetSig);
   if (!targetBuy) {
     try {
-      // 走 Helius Enhanced → 公共 RPC 的 fallback，避免 Helius 限流时拿不到目标 tx
+      // 走 Helius Parsed Events → 公共 RPC 的 fallback（10 cr + 1 cr），避免 Helius 限流时拿不到目标 tx
       const enhanced = await helius.parseTransactionWithFallback(targetSig);
       if (enhanced) {
         targetBuy = parseHeliusTx(enhanced);
@@ -101,7 +101,8 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
     console.warn('[analyzeBlock] getBlock next slot failed', err);
   }
 
-  // 5) 用 Helius 增强补充 TIP 和 PRIO（批量）— 含两个 slot 的 sigs
+  // 5) 用 Helius Parsed Events 补充 TIP 和 PRIO（批量，10 cr/整个请求）
+  //    相比旧 Enhanced Transactions（100 cr/请求）便宜 10 倍。
   const allRawBuys = [
     ...sameSlotBuys.map((b) => ({ ...b, _slot: slotNum })),
     ...nextSlotBuys.map((b) => ({ ...b, _slot: slotNum + 1 })),
@@ -110,14 +111,17 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
   let enhancedMap = new Map<string, NonNullable<ReturnType<typeof parseHeliusTx>>>();
   if (sigs.length > 0 && sigs.length <= 100) {
     try {
-      const enhancedList = await helius.parseTransactions(sigs);
+      const eventItems = await helius.parseEvents(sigs);
       enhancedMap = new Map(
-        enhancedList
-          .map((e) => [e.signature, parseHeliusTx(e)] as const)
-          .filter(([, v]) => v !== null) as Array<[string, NonNullable<ReturnType<typeof parseHeliusTx>>]>,
+        eventItems
+          .map((item) => {
+            const enhanced = parsedEventItemToEnhanced(item);
+            return enhanced ? ([enhanced.signature, parseHeliusTx(enhanced)] as const) : null;
+          })
+          .filter((entry): entry is readonly [string, NonNullable<ReturnType<typeof parseHeliusTx>>] => entry !== null),
       );
     } catch (err) {
-      console.warn('[analyzeBlock] enhanced parse failed, fall back to RPC only', err);
+      console.warn('[analyzeBlock] parsed-events parse failed, fall back to RPC only', err);
     }
   }
 

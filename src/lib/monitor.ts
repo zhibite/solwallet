@@ -78,7 +78,8 @@ function scheduleNextPoll() {
 /** 轮询所有 active 目标 */
 async function pollAllTargets() {
   // 签名列表是公开 RPC，走多源轮询降 Helius 配额消耗；
-  // 解析（parseTransaction）只能走 Helius Enhanced API，保留
+  // 解析（parseTransaction）现在走 Helius Parsed Events（10 cr/batch），
+  // 比旧的 Enhanced Transactions（100 cr/batch）便宜 10 倍
   const helius = getHelius();
   const rpc = getMultiRpc();
   const targets = await query<any>(`
@@ -106,8 +107,8 @@ async function pollAllTargets() {
         // 单 sig 解析失败（429/网络）→ 跳过这一个,继续下一个。
         // 这条把"Helius 限流 → 整个 target poll 瘫痪"修掉,只丢当批未解析的 sigs,
         // 下次轮询 (默认 15s) 会再扫到同一批未入库的 sigs,DB 主键去重保证不重复入库。
-        // parseTransactionWithFallback: Helius Enhanced 优先,失败/限流时自动
-        // 回退到 6 个公共 RPC + 自适配 parser,Helius 被打满也不会丢解析能力。
+        // parseTransactionWithFallback: Helius Parsed Events 优先 (10 cr/批),
+        // 失败/限流时自动回退到 6 个公共 RPC + 自适配 parser,Helius 被打满也不会丢解析能力。
         let tx: Awaited<ReturnType<typeof helius.parseTransactionWithFallback>> = null;
         try {
           if (parseBackoffMs > 0) await new Promise((r) => setTimeout(r, parseBackoffMs));

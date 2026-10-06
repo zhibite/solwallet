@@ -81,7 +81,7 @@ async function main() {
     let txs: any[] = [];
     for (let attempt = 0; attempt < 4; attempt++) {
       try {
-        txs = await helius.parseTransactions(batch);
+        txs = await helius.parseEventsAsEnhanced(batch);
         break;
       } catch (e: any) {
         const st = e?.response?.status ?? e?.status;

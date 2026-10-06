@@ -13,8 +13,10 @@
  * 1) `getSignaturesForAddress` 根本不是 Helius 专有接口，
  *    就是标准 JSON-RPC。原来它被发到 Helius 的域名，白白消耗配额。
  *
- * 2) 交易解析原本走 Helius 的 `/v0/transactions`。它给的是
- *    **已经解析好的 tokenTransfers / nativeTransfers 列表**。
+ * 2) 交易解析现在走 Helius 的 Parsed Events API（`/v1/parsed-events/transactions`，
+ *    10 cr/请求）。它给的是**已经解析好的 tokenTransfers / nativeTransfers 列表**。
+ *    旧的 Enhanced Transactions（`/v0/transactions`，100 cr/请求）已进 maintenance
+ *    mode，新代码一律走 Parsed Events + 自定义适配器（见 src/lib/helius.ts）。
  *
  * 3) 普通 RPC 没有这个列表，但 `getTransaction` 的 `meta` 里有
  *    `preTokenBalances` / `postTokenBalances` / `preBalances` / `postBalances`，
@@ -239,7 +241,7 @@ export async function fetchTxViews(
   if (activeSource() === 'helius' || (activeSource() === 'auto' && !_heliusDead)) {
     try {
       const { getHelius } = await import('./helius');
-      const parsed = await getHelius().parseTransactions(sigs);
+      const parsed = await getHelius().parseEventsAsEnhanced(sigs);
       // Helius 返回按时间倒序，不按请求顺序，必须按签名对齐
       const bySig = new Map<string, HeliusEnhancedTx>();
       for (const t of parsed) if (t) bySig.set(t.signature, t);

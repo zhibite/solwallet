@@ -30,7 +30,7 @@ async function main() {
   let totalPayout = 0n;
 
   for (const r of sigs) {
-    const list = await helius.parseTransactions([r.signature]);
+    const list = await helius.parseEventsAsEnhanced([r.signature]);
     const tx = list?.[0];
     if (!tx) { console.log(`# ${r.signature}  Helius 没拿到`); continue; }
     console.log(`\nsig ${r.signature}`);

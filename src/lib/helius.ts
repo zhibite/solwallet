@@ -1,24 +1,169 @@
 /**
  * Helius API 客户端
  * 文档: https://docs.helius.dev/
- * - Enhanced Transactions API: 解析过的交易数据
+ * - Parsed Events API: 解析过的交易数据（10 credits/request，Enhanced 的继任者）
  * - Enhanced Webhooks: 实时推送
  * - DAS API: 资产元数据
  *
- * 新版 endpoint 格式（api-key 通过 query string 传入）：
- *   - RPC:               POST https://mainnet.helius-rpc.com/?api-key=<KEY>
- *   - 解析交易:          POST https://mainnet.helius-rpc.com/v0/transactions/?api-key=<KEY>
- *   - 地址交易:          GET  https://mainnet.helius-rpc.com/v0/addresses/<addr>/transactions/?api-key=<KEY>
- *   - Webhook 列表:      GET  https://mainnet.helius-rpc.com/v0/webhooks/?api-key=<KEY>
- *   - Webhook 创建:      POST https://mainnet.helius-rpc.com/v0/webhooks/?api-key=<KEY>
- *   - Webhook 更新:      PUT  https://mainnet.helius-rpc.com/v0/webhooks/<id>/?api-key=<KEY>
- *   - Webhook 删除:      DELETE https://mainnet.helius-rpc.com/v0/webhooks/<id>/?api-key=<KEY>
+ * 端点：
+ *   - RPC:                       POST https://mainnet.helius-rpc.com/?api-key=<KEY>
+ *   - Parsed Events 解析:        POST https://mainnet.helius-rpc.com/v1/parsed-events/transactions
+ *   - 地址历史解析:              POST https://mainnet.helius-rpc.com/v1/parsed-events/transaction-history
+ *   - Webhook 列表:              GET  https://mainnet.helius-rpc.com/v0/webhooks/?api-key=<KEY>
+ *   - Webhook 创建:              POST https://mainnet.helius-rpc.com/v0/webhooks/?api-key=<KEY>
+ *   - Webhook 更新:              PUT  https://mainnet.helius-rpc.com/v0/webhooks/<id>/?api-key=<KEY>
+ *   - Webhook 删除:              DELETE https://mainnet.helius-rpc.com/v0/webhooks/<id>/?api-key=<KEY>
+ *
+ * 计费要点（2026/10 起）：
+ *   - Parsed Events:  10 cr / request（不受签名数影响）
+ *   - Enhanced Tx:   100 cr / request（legacy，maintenance mode）
+ *   - getSignaturesForAddress: 1 cr
+ *   - getTransaction: 1 cr
+ *   - Webhook push:  1 cr / 推送事件
+ *
+ * 通用计费：https://www.helius.dev/docs/billing/credits
  */
 
 import axios, { AxiosInstance } from 'axios';
 import type { HeliusEnhancedTx } from './types';
 import { solanaTxToHeliusEnhanced } from './parser';
 import { getMultiRpc } from './multi-rpc';
+
+// ============================================================================
+// Parsed Events API 类型定义（Helius 新版解析端点，10 credits/request）
+// ============================================================================
+
+/** Parsed Events 的单个解析结果 */
+export interface ParsedEventItem {
+  signature: string;
+  parserStatus: 'OK' | 'ERROR';
+  parsed?: ParsedEventParsed;
+  /** 原 Solana 交易，仅当请求中 includeRawTransaction=true 时存在 */
+  raw?: any;
+}
+
+export interface ParsedEventParsed {
+  slot: number;
+  blockTime: number;
+  fee: number;
+  feePayer: string;
+  transactionStatus: 'OK' | 'FAILED';
+  error: unknown | null;
+  decodedError: unknown | null;
+  nativeTransfers?: Array<{
+    fromUserAccount: string;
+    toUserAccount: string;
+    amount: number;
+  }>;
+  tokenTransfers?: Array<{
+    fromUserAccount: string;
+    toUserAccount: string;
+    fromTokenAccount: string;
+    toTokenAccount: string;
+    rawTokenAmount: number | string;
+    decimals: number;
+    tokenStandard: string;
+    mint: string;
+  }>;
+  /** 顶层交易摘要，例如 swap / transfer / create 等 */
+  summary?: {
+    type?: string;
+    description?: string;
+    parsedData?: {
+      type?: string;
+      protocol?: string;  // jupiter / raydium / pump.fun / orca ...
+    };
+  };
+  instructions?: Array<{
+    instructionIndex: number;
+    innerInstructionIndex: number | null;
+    stackHeight: number;
+    programId: string;
+    rawAccounts: string[];
+    rawData: string;
+    programName?: string;
+    instructionName?: string;
+    decoded?: any;
+  }>;
+}
+
+// ============================================================================
+// Parsed Events → HeliusEnhancedTx 适配器
+// ============================================================================
+
+/**
+ * 把 Parsed Events 单条结果适配成 HeliusEnhancedTx 形状。
+ * 这样做的好处：下游 parser.ts / first-sniper.ts 完全不感知数据源差异。
+ *
+ * 关键映射：
+ *   tokenTransfers: rawTokenAmount / 10^decimals → tokenAmount
+ *   instructions:   rawAccounts → accounts（已经含 programId 字符串）
+ *   source:         summary.parsedData.protocol → source（jupiter / raydium / ...）
+ *   version:        读 rawTransaction.version；raw 缺失时保守设为 'legacy'
+ *   _hasAlt:        读 rawTransaction.message.addressTableLookups（仅 v0 有意义）
+ *
+ * 返回 null 表示该项解析失败（parserStatus !== 'OK' 或缺关键字段）。
+ */
+export function parsedEventItemToEnhanced(item: ParsedEventItem): HeliusEnhancedTx | null {
+  if (!item || item.parserStatus !== 'OK' || !item.parsed) return null;
+  const p = item.parsed;
+
+  // tokenTransfers：把 rawTokenAmount / 10^decimals → tokenAmount（与 Enhanced 兼容）
+  const tokenTransfers = (p.tokenTransfers ?? []).map((t) => {
+    const raw = typeof t.rawTokenAmount === 'string' ? Number(t.rawTokenAmount) : t.rawTokenAmount;
+    const decimals = t.decimals ?? 0;
+    return {
+      fromUserAccount: t.fromUserAccount,
+      toUserAccount: t.toUserAccount,
+      fromTokenAccount: t.fromTokenAccount,
+      toTokenAccount: t.toTokenAccount,
+      mint: t.mint,
+      tokenStandard: t.tokenStandard,
+      tokenAmount: decimals > 0 ? raw / Math.pow(10, decimals) : raw,
+    };
+  });
+
+  // instructions：rawAccounts → accounts（已经是展开的 pubkey 字符串）
+  const instructions = (p.instructions ?? []).map((ix) => ({
+    programId: ix.programId,
+    accounts: ix.rawAccounts ?? [],
+    data: ix.rawData ?? '',
+  }));
+
+  // version：从 raw.transaction.message 推断 v0 / legacy
+  let version: 'legacy' | 0 = 'legacy';
+  let hasAlt: boolean | null = null;
+  const rawTx = item.raw;
+  if (rawTx) {
+    // web3.js 风格，version 字段可能在 raw.transaction.message.version 或顶层 raw.version
+    const topVer = rawTx.version ?? rawTx?.transaction?.version;
+    if (topVer === 0 || topVer === '0') version = 0;
+    const lookups = rawTx?.transaction?.message?.addressTableLookups;
+    hasAlt = Array.isArray(lookups) && lookups.length > 0;
+  }
+
+  // source：Parsed Events 在 summary.parsedData.protocol 给出 DEX 名
+  const source = p.summary?.parsedData?.protocol ?? '';
+
+  return {
+    signature: item.signature,
+    slot: p.slot,
+    blockTime: p.blockTime,
+    fee: p.fee,
+    feePayer: p.feePayer,
+    version,
+    tokenTransfers,
+    nativeTransfers: p.nativeTransfers ?? [],
+    instructions,
+    source,
+    type: p.summary?.type,
+    // 失败交易走 transactionError 字段，让 parser.ts 的 success 判定正确生效
+    transactionError: p.transactionStatus === 'FAILED' ? p.error ?? true : null,
+    // 内部标记：fallback 适配器写；与 solanaTxToHeliusEnhanced 路径同款字段，
+    // parser.ts 的 isBundled / computeBundleId 都靠它识别 Jito bundle
+    _hasAlt: hasAlt,
+  } as HeliusEnhancedTx & { _hasAlt: boolean | null };
+}
 
 const HELIUS_BASE = 'https://mainnet.helius-rpc.com';
 
@@ -48,35 +193,71 @@ export class HeliusClient {
     return data.result as T;
   }
 
-  /** 通过 Enhanced Transactions API 解析单笔/多笔交易 */
-  async parseTransactions(signatures: string[]): Promise<HeliusEnhancedTx[]> {
+  /**
+   * 通过 Parsed Events API 批量解析交易签名（10 credits / request，与签名数无关）
+   *
+   * 相比旧的 Enhanced Transactions API（100 cr / request）：
+   *   - 单价便宜 10 倍 → 大批量解析大幅降本
+   *   - 响应顺序与请求顺序一致（含重复），单项失败用 parserStatus='ERROR' 标识
+   *
+   * 返回 raw 原始 Solana 交易，供适配器读取 version / addressTableLookups，
+   * 这些字段 Helius Enhanced 没给但 parser.ts 的 isBundled / computeBundleId 需要。
+   */
+  async parseEvents(signatures: string[]): Promise<ParsedEventItem[]> {
     if (signatures.length === 0) return [];
     const { data } = await this.http.post(
-      '/v0/transactions/',
-      { transactions: signatures },
+      '/v1/parsed-events/transactions',
+      {
+        transactions: signatures,
+        // 拿原始 tx 用来读 version / addressTableLookups（影响 isBundled 判定）
+        includeRawTransaction: true,
+      },
       { timeout: 30_000 },
     );
-    return data as HeliusEnhancedTx[];
+    if (!Array.isArray(data)) {
+      throw new Error(`Parsed Events 响应不是数组：${JSON.stringify(data).slice(0, 200)}`);
+    }
+    return data as ParsedEventItem[];
   }
 
-  /** 解析单笔交易 */
-  async parseTransaction(signature: string): Promise<HeliusEnhancedTx | null> {
-    const list = await this.parseTransactions([signature]);
-    return list[0] ?? null;
+  /**
+   * 单笔解析便捷方法
+   */
+  async parseEvent(signature: string): Promise<HeliusEnhancedTx | null> {
+    const list = await this.parseEvents([signature]);
+    if (list.length === 0) return null;
+    return parsedEventItemToEnhanced(list[0]);
+  }
+
+  /**
+   * 批量解析便捷方法：把 parseEvents 的所有结果适配成 HeliusEnhancedTx，
+   * 丢弃 parserStatus='ERROR' 的项。适配失败的项同样丢弃。
+   *
+   * 调用点（scripts/backfill-copy-pnl.ts 等）原本直接拿 HeliusEnhancedTx，
+   * 改走 Parsed Events 后必须经适配器转一次 → 集中在这里，避免每个调用点重复适配逻辑。
+   */
+  async parseEventsAsEnhanced(signatures: string[]): Promise<HeliusEnhancedTx[]> {
+    const items = await this.parseEvents(signatures);
+    const out: HeliusEnhancedTx[] = [];
+    for (const item of items) {
+      const enhanced = parsedEventItemToEnhanced(item);
+      if (enhanced) out.push(enhanced);
+    }
+    return out;
   }
 
   /**
    * 带 fallback 的单笔交易解析
-   * 1) 先走 Helius Enhanced API（首选，解析最干净）
+   * 1) 先走 Helius Parsed Events（首选，10 cr，且能区分 Enhanced 没有的字段如 version/ALT）
    * 2) 失败 / 限流（429/503/5xx）/ 抛错 → 用 6 个公共 RPC 的 getTransaction 兜底，
    *    通过 solanaTxToHeliusEnhanced 适配成 HeliusEnhancedTx 形状后返回
    *
    * 整体不再抛错（除非两边都炸），让上游如 monitor 的 try/catch 不会因 429 把整批 target 拖死
    */
   async parseTransactionWithFallback(signature: string): Promise<HeliusEnhancedTx | null> {
-    // 1) Helius Enhanced
+    // 1) Helius Parsed Events
     try {
-      const r = await this.parseTransaction(signature);
+      const r = await this.parseEvent(signature);
       if (r) return r;
     } catch (err: any) {
       const status = err?.response?.status ?? err?.status;

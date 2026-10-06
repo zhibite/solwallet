@@ -41,7 +41,7 @@ export async function POST(req: NextRequest) {
     for (const s of inRange) {
       if (s.err) continue;
       try {
-        const tx = await helius.parseTransaction(s.signature);
+        const tx = await helius.parseEvent(s.signature);
         if (!tx || isFailedTx(tx)) continue;
         const buy = parseHeliusTx(tx);
         if (!buy || buy.address !== address) continue;
