@@ -362,7 +362,11 @@ export async function recomputeAllDecisions(): Promise<{
   durationMs: number;
 }> {
   const t0 = Date.now();
-  // 门槛与 pool.ts 的 autoPromote 共用同一组 env（8/4），不再硬编码 3
+  // 复用 POOL_PROMOTE_FREQ 作为「池里值得给人看的成员」门槛：
+  //   - 自动晋升开启时，这个阈值就是晋升门槛
+  //   - 自动晋升关闭时（默认），相当于「freq >= N 的成员都进 worth_score 重算，
+  //     池页面按分数排序给人手动选」。改名 POOL_SCORE_MIN_FREQ 会更准确但要
+  //     同步改 .env + 历史部署，先复用同一组环境变量。
   const freqMin = parseInt(process.env.POOL_PROMOTE_FREQ || '8', 10);
 
   const targets = await query<any>(

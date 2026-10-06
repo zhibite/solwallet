@@ -1,5 +1,5 @@
 /**
- * 池子 (Pool) —— 自动发现 / 递归归池
+ * 池子 (Pool) —— 自动发现 / 递归归池 / 决策重排
  *
  * 核心流程:
  *   1) 从 monitored_targets seed 开始
@@ -7,8 +7,16 @@
  *      - mark in (first_sniper, follower, pre_target) 的地址 = 该 target 的「跟随者」
  *   3) 聚合到 pool_members (地址、角色、出现次数、跟随目标列表)
  *   4) 聚合到 pool_edges (follower -> target 关系)
- *   5) freq 高于阈值的 pool_member 自动 promote 到 monitored_targets
+ *   5) [默认关闭] freq 高的 pool_member 自动 promote 到 monitored_targets
  *   6) 进入下一轮 BFS（深度 BFS，可设上限）
+ *
+ * 晋升策略 (2026-10-06 调整)：
+ *   POOL_AUTO_PROMOTE 默认 false。监控目标列表现在完全由人工维护，池子只负责
+ *   「发现 + 重排」：把监控地址相关的所有跟随者拉进池子，重算 worth_score /
+ *   recommended_tip_sol，供人在池子页面浏览、按分数排序后**手动**点晋升
+ *   （/api/pool/[address]/promote）。这样池子不再触发 Helius 解析新增地址，
+ *   Helius 配额只花在 monitored_targets 的 active 目标上。
+ *   旧行为通过 POOL_AUTO_PROMOTE=true 仍可恢复，autoPromote() 函数本身保留。
  *
  * 触发点:
  *   - monitor.ts 的 ingestTargetTrade: 每次新增 target_trades 后异步触发本 target 的增量扫描
@@ -25,6 +33,18 @@ const PROMOTE_FREQ_THRESHOLD = parseInt(process.env.POOL_PROMOTE_FREQ || '8', 10
 const PROMOTE_MIN_DISTINCT_TARGETS = parseInt(process.env.POOL_PROMOTE_DISTINCT || '4', 10); // 至少跟过 N 个独立 target
 const PROMOTE_DEFAULT_THRESHOLD = parseFloat(process.env.POOL_PROMOTE_THRESHOLD || '0.5');
 const BFS_MAX_DEPTH = parseInt(process.env.POOL_BFS_DEPTH || '3', 10);
+
+/**
+ * 是否在 BFS 每一层末尾自动把高 freq 池成员晋升进 monitored_targets。
+ *
+ * 默认 false（2026-10-06 起）—— 监控列表改为纯人工维护，池子只负责发现 + 决策重排。
+ * 任何非空、且不是 '0'/'false'/'no'/'off' 的值都视为 true，留作旧行为恢复的口子。
+ */
+function autoPromoteEnabled(): boolean {
+  const v = (process.env.POOL_AUTO_PROMOTE ?? '').trim().toLowerCase();
+  if (v === '' || v === '0' || v === 'false' || v === 'no' || v === 'off') return false;
+  return true;
+}
 
 export interface PoolMember {
   id: number;
@@ -385,6 +405,9 @@ export async function scanForTarget(opts: {
 /**
  * 自动晋升: freq 高的 pool_member 加入 monitored_targets
  * 返回被晋升的 address 列表
+ *
+ * 注意：runBFS 默认**不会**调这个函数（见 POOL_AUTO_PROMOTE）。它只用于
+ * 一次性脚本/历史回填场景；日常运行时池子只做发现 + 决策重排，晋升必须人工触发。
  */
 export async function autoPromote(opts: {
   freqThreshold?: number;
@@ -442,6 +465,11 @@ export async function autoPromote(opts: {
 
 /**
  * BFS 全量扫描: 从 monitored_targets seed 开始，深度受限递归归池
+ *
+ * 每层深度只做两件事：
+ *   1) 对当前所有 active target 增量扫描 block_buyers，把新跟随者入池
+ *   2) 若 POOL_AUTO_PROMOTE=true，再调 autoPromote() 把高频池成员塞进
+ *      monitored_targets（默认关闭，监控列表由人工维护）
  */
 export async function runBFS(opts: {
   maxDepth?: number;
@@ -453,6 +481,7 @@ export async function runBFS(opts: {
   durationMs: number;
 }> {
   const maxDepth = opts.maxDepth ?? BFS_MAX_DEPTH;
+  const promoteOn = autoPromoteEnabled();
   const t0 = Date.now();
   let scannedTargets = 0;
   let totalNewMembers = 0;
@@ -480,17 +509,23 @@ export async function runBFS(opts: {
       }
     }
 
-    // 深度结束后尝试晋升
-    const promos = await autoPromote();
-    totalPromoted += promos.length;
-    // 晋升的地址标记为已扫描，防止在下一层深度被重复归池
-    for (const p of promos) seenAddresses.add(p);
+    // 深度结束后看是否晋升。默认关闭，监控列表只由人工维护，池子只负责发现 + 重排。
+    let promos: string[] = [];
+    if (promoteOn) {
+      promos = await autoPromote();
+      totalPromoted += promos.length;
+      // 晋升的地址标记为已扫描，防止在下一层深度被重复归池
+      for (const p of promos) seenAddresses.add(p);
+    }
 
     if (newInDepth === 0 && promos.length === 0) {
       console.log(`[pool] BFS converged at depth ${depth}`);
       break;
     }
-    console.log(`[pool] BFS depth ${depth}: scanned=${scannedTargets} newInDepth=${newInDepth} promoted=${promos.length}`);
+    console.log(
+      `[pool] BFS depth ${depth}: scanned=${scannedTargets} newInDepth=${newInDepth}` +
+      ` promoted=${promos.length} (autoPromote=${promoteOn ? 'on' : 'off'})`,
+    );
   }
 
   return {

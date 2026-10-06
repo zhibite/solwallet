@@ -1,12 +1,12 @@
 /**
  * 池子后台 Worker
- * - 周期性 BFS 归池 + auto promote
- * - 周期性重算决策（worth score + 推荐手续费）
+ * - 周期性 BFS 归池（只发现 + 增量入池，不再自动晋升到 monitored_targets）
+ * - 周期性重算决策（worth score + 推荐手续费），让池页面能按分数排序参考
  *
  * 启动入口：instrumentation.ts（与 monitor 一起）
  */
 
-import { runBFS, autoPromote, scanForTarget } from './pool';
+import { runBFS } from './pool';
 import { recomputeAllDecisions } from './pool-decision';
 
 const BFS_INTERVAL_MS = parseInt(process.env.POOL_BFS_INTERVAL_MS || '600000', 10); // 10 分钟
@@ -24,9 +24,12 @@ export async function startPoolWorker() {
   // 启动后延迟 5 秒跑第一次，避免与 monitor 抢占 RPC
   setTimeout(async () => {
     try {
-      console.log('[pool-worker] initial BFS');
+      console.log('[pool-worker] initial BFS (manual-promote only)');
       const result = await runBFS({});
-      console.log('[pool-worker] initial BFS result:', result);
+      console.log(
+        `[pool-worker] initial BFS done: scanned=${result.scannedTargets} new=${result.totalNewMembers}` +
+        ` updated=${result.totalUpdatedMembers} promoted=${result.totalPromoted}`,
+      );
     } catch (err) {
       console.error('[pool-worker] initial BFS failed', err);
     }
@@ -35,7 +38,11 @@ export async function startPoolWorker() {
   bfsTimer = setInterval(async () => {
     try {
       const result = await runBFS({});
-      console.log('[pool-worker] BFS result:', result);
+      // 默认 POOL_AUTO_PROMOTE=false，totalPromoted 永远是 0，仅作日志提示
+      console.log(
+        `[pool-worker] BFS done: scanned=${result.scannedTargets} new=${result.totalNewMembers}` +
+        ` updated=${result.totalUpdatedMembers} promoted=${result.totalPromoted} (manual-only)`,
+      );
     } catch (err) {
       console.error('[pool-worker] BFS failed', err);
     }
