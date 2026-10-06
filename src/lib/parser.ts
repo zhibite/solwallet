@@ -4,7 +4,9 @@
  * 输出：标准化 buy 信息（MINT / SOL 数量 / TIP / PRIO / 是否 bundled）
  *
  * 关键概念：
- * - buy_sol: 实际买入花了多少 SOL（preBalance - postBalance, 减去 rent / fee）
+ * - buy_sol: 买入花掉的 SOL（含 jito tip / ATA rent，**不含** tx fee）。
+ *   两路算法（Helius 增强 API / 公共 RPC）口径统一都是这个语义，
+ *   fee 在 pnl.ts 里单独按 soldRatio 分摊扣减。
  * - tip_sol: 给 validator 的小费
  * - prio_lamports: 优先级费 (compute unit price * CU)
  * - bundled: 是否是 jito bundle 内交易（通过 ALT / 同一 slot 内 5+ 笔极短时间内发送判断）
@@ -45,6 +47,11 @@ export interface ParsedBuy {
   hasAlt: boolean | null;   // 是否观察到 Address Lookup Table（fallback 适配器写；Helius 路径为 null）
   bundleId: string | null;  // 同 bundle 的多笔共享同一 ID
   source: string;           // pump.fun / raydium / jupiter 等
+  /**
+   * 0010: tip 收款渠道。null = 未付 tip；
+   *        'unknown' = 付了 tip 但收款地址不在 4 通道（jito / helius_sender / landx / zero_slot）里。
+   */
+  tipSource: import('./types').TipSource | null;
   success: boolean;
   tokenAmount?: number | null;
 }
@@ -94,23 +101,33 @@ function findInboundTransfer(tx: HeliusEnhancedTx) {
  *
  * owner 通常就是 feePayer，但 Jito bundle / relayer 代付场景下 feePayer 可能是别人，
  * 而 token 的实际持有人是钱包本身，所以两个账户都要认。
+ *
+ * 注意用 .reduce() 而不是 .find()：一笔交易里同 mint 可能通过多条路径打到 owner
+ * （比如 swap 走多跳中间池），只取第一笔会少算 token 数 —— 这种漏算会破坏 pnl.ts 里
+ * FIFO 配对的分母 / 分子，下游的 soldRatio 与 proceeds 都会偏。
  */
 export function inboundTokenAmount(tx: HeliusEnhancedTx, mint: string, owner?: string): number {
   const mine = (t: { mint: string; toUserAccount: string }) =>
     t.mint === mint && (t.toUserAccount === tx.feePayer || t.toUserAccount === owner);
-  const t = (tx.tokenTransfers ?? []).find(mine);
-  return t ? Number(t.tokenAmount) : 0;
+  return (tx.tokenTransfers ?? [])
+    .filter(mine)
+    .reduce((sum, t) => sum + Number(t.tokenAmount), 0);
 }
 
-/** 某笔交易里，指定 mint 从 owner 流出的 token 数量（卖出数量） */
+/** 某笔交易里，指定 mint 从 owner 流出的 token 数量（卖出数量）。
+ *  同样的原因用 .reduce() 而不是 .find()。 */
 export function outboundTokenAmount(tx: HeliusEnhancedTx, mint: string, owner?: string): number {
   const mine = (t: { mint: string; fromUserAccount: string }) =>
     t.mint === mint && (t.fromUserAccount === tx.feePayer || t.fromUserAccount === owner);
-  const t = (tx.tokenTransfers ?? []).find(mine);
-  return t ? Number(t.tokenAmount) : 0;
+  return (tx.tokenTransfers ?? [])
+    .filter(mine)
+    .reduce((sum, t) => sum + Number(t.tokenAmount), 0);
 }
 
-/** 计算买入花费的 SOL（含 jito tip 与 priority fee） */
+/** 计算买入花费的 SOL：含 jito tip 与 ATA rent，**不含** tx fee（fee 单独走 buyFeeLamports）。
+ *
+ *  Helius 路径：nativeTransfers 是账户间转账列表，runtime 烧掉的 fee 不在里面，
+ *  所以直接累加 feePayer 的 outgoing transfers 就是 buy + tip + rent。 */
 export function calcBuySol(tx: HeliusEnhancedTx): number {
   // SOL 净流出 = preBalance - postBalance，再扣 fee 即 buy 金额
   // 但 tx 没有直接给 preBalance/postBalance，所以从 nativeTransfers 推算
@@ -131,20 +148,23 @@ export function calcBuySol(tx: HeliusEnhancedTx): number {
 }
 
 /**
- * Jito 8 个 tip 收款账户（写死的版本；启动时若 `JITO_TIP_ACCOUNTS_REFRESH=1`
- * 会从 https://mainnet.block-engine.jito.wtf/api/v1/getTipAccounts 重新拉，覆盖这份静态表）
+ * Solana tip 收款账户全集（jito / helius_sender / landx / zero_slot 四通道合并，2026/10 快照）。
  *
- * 快照自 2025/09/30 实际请求：
- *   DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL
- *   HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe
- *   Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY
- *   96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5
- *   ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49
- *   3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT
- *   DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh
- *   ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt
+ * 各通道来源：
+ *   - jito:           https://mainnet.block-engine.jito.wtf/api/v1/getTipAccounts（refreshSolanaTipAccounts 会自动刷新这 8 个）
+ *   - helius_sender:  https://docs.helius.dev/sending-transactions（Designated Tip Accounts, 10 个，Sender Max 最低 0.001 SOL）
+ *   - landx:          https://landx-1.gitbook.io/landx-docs/tip-addresses（10 个，地址前缀 LandX，最低 0.001 SOL）
+ *   - zero_slot:      https://0slot.trade（10 个，Advanced 档 0.0001 SOL / 默认档 0.001 SOL）
+ *
+ * 同一笔 buy 同时付多个通道极少见（如 Helius Sender 的多通路 fan-out），
+ * calcSolanaTip / getTipSource 永远取首个命中的通道，余额累加（保证 tip_sol 不漏）。
+ *
+ * 新通道（Harmonic / Rakurai / jitoBAM 等）按以下步骤加：
+ *   1) 把新地址放进 SOLANA_TIP_SOURCE_MAP（值 = 渠道名）
+ *   2) 跑 backfill-tip-source.ts 回填历史 tip_source
  */
-export let JITO_TIP_ACCOUNTS: ReadonlySet<string> = new Set([
+export let SOLANA_TIP_ACCOUNTS: ReadonlySet<string> = new Set([
+  // === Jito（8 个；由 refreshSolanaTipAccounts 自动覆盖）===
   'DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL',
   'HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe',
   'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY',
@@ -153,10 +173,107 @@ export let JITO_TIP_ACCOUNTS: ReadonlySet<string> = new Set([
   '3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT',
   'DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh',
   'ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt',
+
+  // === Helius Sender（10 个，2026/10 文档）===
+  '4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE',
+  'D2L6yP2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ',
+  '9bnz4RShgq1hAnLnZbP8kbgBg1kEmcJBYQq3gQbmnSta',
+  '5VY91ws6B2hMmBFRsXkoAAdsPHBJwRfBht4DXox3xkwn',
+  '2nyhqdwKcJZR2vcqCyrYsaPVdAnFoJjiksCXJ7hfEYgD',
+  '2q5pghRs6arqVjRvT5gfgWfWcHWmw1ZuCzphgd5KfWGJ',
+  'wyvPkWjVZz1M8fHQnMMCDTQDbkManefNNhweYk5WkcF',
+  '3KCKozbAaF75qEU33jtzozcJ29yJuaLJTy2jFdzUY8bT',
+  '4vieeGHPYPG2MmyPRcYjdiDmmhN3ww7hsFNap8pVN3Ey',
+  '4TQLFNWK8AovT1gFvda5jfw2oJeRMKEmw7aH6MGBJ3or',
+
+  // === LandX（10 个，地址前缀 LandX）===
+  'LandX1EMgYtrfi4jVJ7ryby4mDpZcef6sVH9b9U1cog',
+  'LandX2gHE7y6RejuvoLJK4hJiKkrAwcrJJ34u19Gmo1',
+  'LandX3uK1cSUF7hbefKo3oL1j4FhvhxitiMRKut99Z6',
+  'LandX4wXzvDyWfq1XXn4StRjwPjzqb7je2kqDGLoT9L',
+  'LandX5T4jfRASrcn76owxHM4q9bduNGj24ev4Ufc5fP',
+  'LandX6RsjjnfaxfYAFTZX1TW9Cgfe9HFStj9nRDd5SK',
+  'LandX7LsdzXDAbbyBjAq5FxLTnGQaU3LojGQMLZCvkt',
+  'LandX8Gv3UkhjmgKdSEg4F7yG7Z2tiqhNDYDtxazydN',
+  'LandX9fhNN5S7fuBgekKBYeYvK1Sy9hbGvDmHsBGYFh',
+  'LandXXxDXaSS8MjrqG9nri51htrfM6V4R3zXDVCeV8R',
+
+  // === 0slot（10 个，Advanced 档 0.0001 SOL / 默认 0.001 SOL）===
+  'DiTmWENJsHQdawVUUKnUXkconcpW4Jv52TnMWhkncF6t',
+  'HRyRhQ86t3H4aAtgvHVpUJmw64BDrb61gRiKcdKUXs5c',
+  '7y4whZmw388w1ggjToDLSBLv47drw5SUXcLk6jtmwixd',
+  'J9BMEWFbCBEjtQ1fG5Lo9kouX1HfrKQxeUxetwXrifBw',
+  '8U1JPQh3mVQ4F5jwRdFTBzvNRQaYFQppHQYoH38DJGSQ',
+  'Eb2KpSC8uMt9GmzyAEm5Eb1AAAgTjRaXWFjKyFXHZxF3',
+  'FCjUJZ1qozm1e8romw216qyfQMaaWKxWsuySnumVCCNe',
+  'ENxTEjSQ1YabmUpXAdCgevnHQ9MHdLv8tzFiuiYJqa13',
+  '6rYLG55Q9RpsPGvqdPNJs4z5WTxJVatMB8zV3WJhs5EK',
+  'Cix2bHfqPcKcM233mzxbLk14kSggUUiz2A87fJtGivXr',
 ]);
 
 /**
- * 从 Jito block engine 实时刷新 tip accounts（覆盖上面的静态表）。
+ * tip 收款地址 → 渠道名映射。
+ * SOLANA_TIP_ACCOUNTS 是这个 map 的 keys，是同一份数据的两种视图。
+ * 给一个 tip 收款地址，告诉你它属于哪个 tip 通道（用于落 tip_source 列）。
+ */
+export const SOLANA_TIP_SOURCE_MAP: Readonly<Record<string, import('./types').TipSource>> = {
+  // Jito
+  'DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL': 'jito',
+  'HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe': 'jito',
+  'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY': 'jito',
+  '96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5': 'jito',
+  'ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49': 'jito',
+  '3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT': 'jito',
+  'DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh': 'jito',
+  'ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt': 'jito',
+  // Helius Sender
+  '4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE': 'helius_sender',
+  'D2L6yP2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ': 'helius_sender',
+  '9bnz4RShgq1hAnLnZbP8kbgBg1kEmcJBYQq3gQbmnSta': 'helius_sender',
+  '5VY91ws6B2hMmBFRsXkoAAdsPHBJwRfBht4DXox3xkwn': 'helius_sender',
+  '2nyhqdwKcJZR2vcqCyrYsaPVdAnFoJjiksCXJ7hfEYgD': 'helius_sender',
+  '2q5pghRs6arqVjRvT5gfgWfWcHWmw1ZuCzphgd5KfWGJ': 'helius_sender',
+  'wyvPkWjVZz1M8fHQnMMCDTQDbkManefNNhweYk5WkcF': 'helius_sender',
+  '3KCKozbAaF75qEU33jtzozcJ29yJuaLJTy2jFdzUY8bT': 'helius_sender',
+  '4vieeGHPYPG2MmyPRcYjdiDmmhN3ww7hsFNap8pVN3Ey': 'helius_sender',
+  '4TQLFNWK8AovT1gFvda5jfw2oJeRMKEmw7aH6MGBJ3or': 'helius_sender',
+  // LandX（前缀 LandX，全部 landx）
+  'LandX1EMgYtrfi4jVJ7ryby4mDpZcef6sVH9b9U1cog': 'landx',
+  'LandX2gHE7y6RejuvoLJK4hJiKkrAwcrJJ34u19Gmo1': 'landx',
+  'LandX3uK1cSUF7hbefKo3oL1j4FhvhxitiMRKut99Z6': 'landx',
+  'LandX4wXzvDyWfq1XXn4StRjwPjzqb7je2kqDGLoT9L': 'landx',
+  'LandX5T4jfRASrcn76owxHM4q9bduNGj24ev4Ufc5fP': 'landx',
+  'LandX6RsjjnfaxfYAFTZX1TW9Cgfe9HFStj9nRDd5SK': 'landx',
+  'LandX7LsdzXDAbbyBjAq5FxLTnGQaU3LojGQMLZCvkt': 'landx',
+  'LandX8Gv3UkhjmgKdSEg4F7yG7Z2tiqhNDYDtxazydN': 'landx',
+  'LandX9fhNN5S7fuBgekKBYeYvK1Sy9hbGvDmHsBGYFh': 'landx',
+  'LandXXxDXaSS8MjrqG9nri51htrfM6V4R3zXDVCeV8R': 'landx',
+  // 0slot
+  'DiTmWENJsHQdawVUUKnUXkconcpW4Jv52TnMWhkncF6t': 'zero_slot',
+  'HRyRhQ86t3H4aAtgvHVpUJmw64BDrb61gRiKcdKUXs5c': 'zero_slot',
+  '7y4whZmw388w1ggjToDLSBLv47drw5SUXcLk6jtmwixd': 'zero_slot',
+  'J9BMEWFbCBEjtQ1fG5Lo9kouX1HfrKQxeUxetwXrifBw': 'zero_slot',
+  '8U1JPQh3mVQ4F5jwRdFTBzvNRQaYFQppHQYoH38DJGSQ': 'zero_slot',
+  'Eb2KpSC8uMt9GmzyAEm5Eb1AAAgTjRaXWFjKyFXHZxF3': 'zero_slot',
+  'FCjUJZ1qozm1e8romw216qyfQMaaWKxWsuySnumVCCNe': 'zero_slot',
+  'ENxTEjSQ1YabmUpXAdCgevnHQ9MHdLv8tzFiuiYJqa13': 'zero_slot',
+  '6rYLG55Q9RpsPGvqdPNJs4z5WTxJVatMB8zV3WJhs5EK': 'zero_slot',
+  'Cix2bHfqPcKcM233mzxbLk14kSggUUiz2A87fJtGivXr': 'zero_slot',
+};
+
+/**
+ * 给 tip 收款地址查来源渠道；null = 不在已知 4 通道中
+ * （调用方应当用 calcSolanaTip > 0 这个判定先做一次，命中后再查这个函数更安全）。
+ */
+export function getTipSource(addr: string | null | undefined): import('./types').TipSource | null {
+  if (!addr) return null;
+  return (SOLANA_TIP_SOURCE_MAP as Record<string, import('./types').TipSource>)[addr] ?? null;
+}
+
+/**
+ * 从 Jito block engine 实时刷新 tip accounts。
+ * 注意：Helius Sender / LandX / 0slot 的 tip account 是写死列表（这些服务不公开 getTipAccounts 接口），
+ *       所以这里只刷新 Jito 那 8 个，其它三通道仍走静态常量。
  * 失败时保留旧值。
  */
 export async function refreshJitoTipAccounts(): Promise<{ ok: boolean; source: string; count: number }> {
@@ -168,7 +285,15 @@ export async function refreshJitoTipAccounts(): Promise<{ ok: boolean; source: s
     });
     const j: any = await r.json();
     if (Array.isArray(j?.result) && j.result.length >= 1) {
-      JITO_TIP_ACCOUNTS = new Set(j.result);
+      // 把 Jito 新地址并入 SOLANA_TIP_ACCOUNTS，并保持 SOLANA_TIP_SOURCE_MAP 标记为 'jito'
+      const existing = new Set(SOLANA_TIP_ACCOUNTS);
+      for (const addr of j.result as string[]) {
+        if (!existing.has(addr)) {
+          existing.add(addr);
+          (SOLANA_TIP_SOURCE_MAP as Record<string, import('./types').TipSource>)[addr] = 'jito';
+        }
+      }
+      SOLANA_TIP_ACCOUNTS = existing;
       return { ok: true, source: 'live', count: j.result.length };
     }
     return { ok: false, source: 'live(empty)', count: 0 };
@@ -177,12 +302,37 @@ export async function refreshJitoTipAccounts(): Promise<{ ok: boolean; source: s
   }
 }
 
-/** 计算 jito tip（转账给 8 个 jito tip account 中的一个） */
-export function calcJitoTip(tx: HeliusEnhancedTx): number {
+/**
+ * 兼容旧名：脚本里偶尔还会 import { JITO_TIP_ACCOUNTS }，
+ * 直接 export 同样的 SOLANA_TIP_ACCOUNTS 引用让旧 import 不报错。
+ *
+ * 注意是 getter，不复制——refreshJitoTipAccounts 替换 SOLANA_TIP_ACCOUNTS 后，
+ * 通过 JITO_TIP_ACCOUNTS 拿到的也是新值（如果你 .has(...)）。
+ */
+export const JITO_TIP_ACCOUNTS: ReadonlySet<string> = new Proxy(
+  {} as ReadonlySet<string>,
+  {
+    get(_t, prop) {
+      // 把所有 Set 方法转发到 SOLANA_TIP_ACCOUNTS
+      const v = (SOLANA_TIP_ACCOUNTS as any)[prop];
+      return typeof v === 'function' ? v.bind(SOLANA_TIP_ACCOUNTS) : v;
+    },
+    has(_t, addr) {
+      return SOLANA_TIP_ACCOUNTS.has(addr as string);
+    },
+  },
+);
+
+/**
+ * 计算 tip：转账给任意已知 tip 账户（Jito / Helius Sender / LandX / 0slot）的 lamports 累计 SOL。
+ *
+ * 旧名 calcJitoTip 已弃用，仍以别名 export 给外部脚本兼容。
+ */
+export function calcSolanaTip(tx: HeliusEnhancedTx): number {
   if (!tx.nativeTransfers) return 0;
 
   const tipLamports = tx.nativeTransfers
-    .filter((t) => JITO_TIP_ACCOUNTS.has(t.toUserAccount))
+    .filter((t) => SOLANA_TIP_ACCOUNTS.has(t.toUserAccount))
     .reduce((sum, t) => {
       // Helius nativeTransfers[].amount 在新版 API 是字符串，直接 + 会触发字符串拼接
       const amt = typeof t.amount === 'string' ? Number(t.amount) : t.amount;
@@ -191,6 +341,9 @@ export function calcJitoTip(tx: HeliusEnhancedTx): number {
 
   return tipLamports / LAMPORTS_PER_SOL;
 }
+
+/** @deprecated 改名 calcSolanaTip，外部 import 向后兼容 */
+export const calcJitoTip = calcSolanaTip;
 
 /** 计算 priority fee (compute unit price * compute units) */
 export function calcPriorityFee(tx: HeliusEnhancedTx): number {
@@ -233,9 +386,9 @@ export function calcPriorityFee(tx: HeliusEnhancedTx): number {
 
 /** 是否为 bundled transaction */
 export function isBundled(tx: HeliusEnhancedTx): boolean {
-  // 强信号：付了 jito tip → 必是 jito bundle（tip 是 bundle 唯一可靠的强信号）
-  // 注意：calcJitoTip 用的是 nativeTransfers，转账给 8 个 jito tip account 之一即算。
-  if (calcJitoTip(tx) > 0) return true;
+  // 强信号：付了任意渠道 tip → 必是 bundle（tip 是 bundle 唯一可靠的强信号）
+  // calcSolanaTip 已合并 4 通道（Jito / Helius Sender / LandX / 0slot），转账给其中任一地址即算。
+  if (calcSolanaTip(tx) > 0) return true;
 
   // 次信号：fallback 适配器（solanaTxToHeliusEnhanced）显式观察到了 Address Lookup Table。
   // v0 + ALT 通常表示 jito bundle（jito bundle 强制用 ALT 来塞多笔 tx）。
@@ -259,9 +412,9 @@ export function txHasAlt(tx: HeliusEnhancedTx): boolean | null {
  * 计算 bundle_id：用于把同 bundle 的多笔 tx 串起来。
  *
  * 设计：
- *   - 同 jito bundle 内多笔 tx 通常 feePayer 各不相同（每个 wallet 各付各的 tip），
+ *   - 同 bundle 内多笔 tx 通常 feePayer 各不相同（每个 wallet 各付各的 tip），
  *     因此 bundle_id 不能把 feePayer 算进去；否则同 bundle 的不同 tx 会被误判成不同 bundle。
- *   - 真实 jito bundle 内多笔 tx 共享：slot + jito tip account + tip amount
+ *   - 真实 bundle 内多笔 tx 共享：slot + tip account + tip amount
  *     （bundle 由 tip 账户 + tip 金额 + slot 共同标识，validator 看到的是一组同时落地）。
  *   - 没 tip 时（fallback 解析失败 / Helius Enhanced 路径）：用 (slot, hasAlt flag) 当弱 ID，
  *     不含 feePayer；这意味着 v0+ALT 同 slot 多笔会被聚合到同一 bundle_id（够用但不精确）。
@@ -272,7 +425,7 @@ export function computeBundleId(tx: HeliusEnhancedTx): string | null {
   if (!tx?.slot) return null;
 
   const tipAccount = (tx.nativeTransfers ?? []).find((t) =>
-    JITO_TIP_ACCOUNTS.has(t.toUserAccount),
+    SOLANA_TIP_ACCOUNTS.has(t.toUserAccount),
   );
   const tipAmount = tipAccount
     ? (typeof tipAccount.amount === 'string' ? Number(tipAccount.amount) : tipAccount.amount)
@@ -310,7 +463,7 @@ export function parseHeliusTx(tx: HeliusEnhancedTx): ParsedBuy | null {
     address: tx.feePayer,
     mint,
     buySol: calcBuySol(tx),
-    tipSol: calcJitoTip(tx),
+    tipSol: calcSolanaTip(tx),
     prioLamports: calcPriorityFee(tx),
     fee: tx.fee ?? 0,
     version: tx.version === 0 ? 'v0' : 'legacy',
@@ -318,6 +471,13 @@ export function parseHeliusTx(tx: HeliusEnhancedTx): ParsedBuy | null {
     hasAlt: txHasAlt(tx),
     bundleId: computeBundleId(tx),
     source: tx.source ?? '',
+    // 0010: tip 收款渠道；命中未知收款地址时写 'unknown'，方便后续 backfill。
+    tipSource: (() => {
+      const t = (tx.nativeTransfers ?? []).find((nt) => SOLANA_TIP_ACCOUNTS.has(nt.toUserAccount));
+      if (!t) return null;
+      const src = getTipSource(t.toUserAccount);
+      return src ?? 'unknown';
+    })(),
     // success 判定：
     //   - Helius Enhanced Transactions API 在 tx 失败时通常带 transactionError 字段（非 null）
     //   - 拿不到时（webhook payload 等）默认 true（feePayer 已收 token = 买入成功完成）
@@ -367,7 +527,7 @@ export function parseBlockTxs(
       for (const p of preToken) preMap.set(`${p.accountIndex}-${p.mint}`, p);
 
       // 用 solanaTxToHeliusEnhanced 把 RPC 原始 tx 适配成 Helius 形状，
-      // 这样 calcJitoTip / calcPriorityFee 就能在 Helius Enhanced 限流时仍然
+      // 这样 calcSolanaTip / calcPriorityFee 就能在 Helius Enhanced 限流时仍然
       // 从 instructions + nativeTransfers 里算出真实的 tip / prio。
       // 旧实现 tipSol 硬编码 0，导致 Helius 429 fallback 时 first_sniper_tip_sol 全 0。
       const enhanced = solanaTxToHeliusEnhanced({
@@ -376,13 +536,22 @@ export function parseBlockTxs(
         transaction: wrapper.transaction as any,
         meta: wrapper.meta as any,
       } as TransactionResponse);
-      const tipSol = enhanced ? calcJitoTip(enhanced) : 0;
+      const tipSol = enhanced ? calcSolanaTip(enhanced) : 0;
       const prioLamports = enhanced
         ? calcPriorityFee(enhanced)
         : Math.max(0, (meta.fee ?? 0) - 5000);
       const bundleId = enhanced ? computeBundleId(enhanced) : null;
       const hasAltVal = enhanced ? txHasAlt(enhanced) : null;
       const isBundledVal = enhanced ? isBundled(enhanced) : false;
+      const tipSourceVal = enhanced
+        ? (() => {
+            const t = (enhanced.nativeTransfers ?? []).find((nt: any) =>
+              SOLANA_TIP_ACCOUNTS.has(nt.toUserAccount),
+            );
+            if (!t) return null;
+            return getTipSource(t.toUserAccount) ?? 'unknown';
+          })()
+        : null;
 
       for (const post of postToken) {
         if (post.owner !== feePayer) continue;
@@ -394,7 +563,11 @@ export function parseBlockTxs(
         const delta = postAmount - preAmount;
 
         if (delta > 0) {
-          const solOut = (preBal0 - postBal0) / LAMPORTS_PER_SOL;
+          // preBal0 - postBal0 是 feePayer 的 SOL 净流出（含 buy + tip + rent + fee），
+          // 与 Helius 路径（buySol = buy + tip + rent，**不含** fee）口径不一致。
+          // pnl.ts 已经按 soldRatio 单独扣了一次 buyFee，buySol 里再含 fee 就会被双扣。
+          // 这里减掉 meta.fee 让两条路径口径对齐。
+          const buySol = (preBal0 - postBal0 - (meta.fee ?? 0)) / LAMPORTS_PER_SOL;
           const isVersioned = !!msg.addressTableLookups || !!msg.staticAccountKeys;
           result.push({
             signature: sig,
@@ -402,7 +575,7 @@ export function parseBlockTxs(
             blockTime: block.blockTime ?? 0,
             address: feePayer,
             mint: post.mint,
-            buySol: solOut,
+            buySol,
             tipSol,
             prioLamports,
             fee: meta.fee ?? 0,
@@ -411,6 +584,7 @@ export function parseBlockTxs(
             hasAlt: hasAltVal,
             bundleId,
             source: '',
+            tipSource: tipSourceVal,
             success: true,
             tokenAmount: delta,
           });
@@ -474,7 +648,7 @@ export function solanaTxToHeliusEnhanced(
     const version: 'legacy' | 0 = isVersioned ? 0 : 'legacy';
 
     // v0 是否有 ALT（Address Lookup Table）：影响 isBundled 判定。
-    // Solana 的 Jito bundle 入口强制用 ALT，普通 v0 tx（无 ALT）不算 bundle。
+    // Solana 的 bundle 入口（Jito / Helius Sender bundle / LandX bundle）强制用 ALT，普通 v0 tx（无 ALT）不算 bundle。
     const hasAlt = isVersioned
       ? Array.isArray(message.addressTableLookups) && message.addressTableLookups.length > 0
       : false;
@@ -578,7 +752,7 @@ export function solanaTxToHeliusEnhanced(
     // 有的 tx（如 Pump.fun v0 + ALT）System::Transfer 在 inner 里也被聚合掉、或 base64 解析失败，
     // 此时 nativeTransfers 会少算 feePayer 出去的总 SOL。但 feePayer 的 preBal[0]-postBal[0]
     // 一定是 SOL 净流出 = buy + tip + fee，单独合成一个伪 transfer 让 calcBuySol 能算 buySol。
-    // toUserAccount 留空，calcJitoTip 不会误识别（它只比对 8 个已知 tip account）。
+    // toUserAccount 留空，calcSolanaTip 不会误识别（它只比对 4 通道 38 个已知 tip account）。
     // 扣 fee：preBal-postBal 含 fee，而 Helius 的 calcBuySol 累加的是 nativeTransfers 中的 SOL
     // 转账（不含 fee，因为 fee 走 system program 的特定路径，不是 transfer 指令）。
     const pre0 = meta.preBalances?.[0] ?? 0;

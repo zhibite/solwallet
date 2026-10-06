@@ -3,6 +3,7 @@ import React, { useState, useEffect } from "react";
 import AddressCopy from "@/components/common/AddressCopy";
 import SolAmount from "@/components/common/SolAmount";
 import PrioSolAmount from "@/components/common/PrioSolAmount";
+import TipSourceBadge from "@/components/common/TipSourceBadge";
 import RelativeTime from "@/components/common/RelativeTime";
 import { ChevronDownIcon, ChevronUpIcon } from "@/icons";
 import Link from "next/link";
@@ -35,10 +36,14 @@ interface Trade {
   bundle_id: string | null;
   /** 同 bundle 的笔数（≥2 才有意义） */
   bundle_size: number | null;
+  /** 0010: 自己这笔 buy 的 tip 渠道（null = 未付 tip） */
+  tip_source: import('@/lib/types').TipSource | null;
   first_sniper: string | null;
   first_sniper_buy_sol: string | null;
   first_sniper_tip_sol: string | null;
   first_sniper_prio_lamports: number | null;
+  /** 0010: 狙击者的 tip 渠道（来自 block_buyers.tip_source 通过 first_sniper_buyer_signature JOIN 拿到的） */
+  first_sniper_tip_source?: import('@/lib/types').TipSource | null;
   first_sniper_signature: string | null;
   first_sniper_offset_pos: number | null;
   first_sniper_offset_ms: number | null;
@@ -234,6 +239,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                 <span>
                   tip <SolAmount value={latest.first_sniper_tip_sol} />
                 </span>
+                <TipSourceBadge value={latest.first_sniper_tip_source} compact />
                 <span className="font-mono">
                   prio <PrioSolAmount value={latest.first_sniper_prio_lamports} />
                 </span>
@@ -275,7 +281,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
 
       {expanded && (
         <tr>
-          <td colSpan={9} className="bg-gray-50 dark:bg-zinc-700/30 px-6 py-4">
+          <td colSpan={10} className="bg-gray-50 dark:bg-zinc-700/30 px-6 py-4">
             {loadingTrades ? (
               <div className="text-xs text-gray-500 dark:text-gray-400">加载中...</div>
             ) : !trades || trades.length === 0 ? (
@@ -292,6 +298,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                       <th className="py-2 px-2 text-right">自己 TIP</th>
                       <th className="py-2 px-2 text-right">自己 PRIO</th>
                       <th className="py-2 px-2 text-center">捆绑</th>
+                      <th className="py-2 px-2 text-center">tip 渠道</th>
                       <th className="py-2 px-2 text-left">首狙</th>
                       <th className="py-2 px-2 text-right">狙击 TIP</th>
                       <th className="py-2 px-2 text-right">狙击 PRIO</th>
@@ -343,6 +350,9 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                           ) : (
                             <span className="text-gray-300">-</span>
                           )}
+                        </td>
+                        <td className="py-1.5 px-2 text-center">
+                          <TipSourceBadge value={t.tip_source} compact />
                         </td>
                         <td className="py-1.5 px-2">
                           {t.first_sniper ? (
@@ -420,7 +430,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
 
       {expanded && sniperExpanded && sniperKey && (
         <tr>
-          <td colSpan={9} className="bg-gray-50 dark:bg-zinc-700/30 px-6 py-4 border-t border-gray-200 dark:border-gray-700">
+          <td colSpan={10} className="bg-gray-50 dark:bg-zinc-700/30 px-6 py-4 border-t border-gray-200 dark:border-gray-700">
             <div className="flex items-center justify-between mb-3">
               <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">
                 Slot {sniperKey.slot} · Mint {sniperKey.mint.slice(0, 6)}…{sniperKey.mint.slice(-4)} 的 block 级买家分布

@@ -3,6 +3,7 @@ import React, { useEffect, useState } from "react";
 import AddressCopy from "@/components/common/AddressCopy";
 import SolAmount from "@/components/common/SolAmount";
 import PrioSolAmount from "@/components/common/PrioSolAmount";
+import TipSourceBadge from "@/components/common/TipSourceBadge";
 import RelativeTime from "@/components/common/RelativeTime";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 
@@ -38,6 +39,8 @@ interface Buyer {
   has_alt: boolean | null;
   bundle_id: string | null;
   bundle_size: number | null;
+  /** 0010: 该笔的 tip 渠道（null = 未付 tip；'unknown' = 付了但不在 4 通道列表里） */
+  tip_source: import('@/lib/types').TipSource | null;
 }
 
 interface Analysis {
@@ -279,6 +282,7 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
                 <th className="px-3 py-2 text-left">地址</th>
                 <th className="px-3 py-2 text-right">买入 SOL</th>
                 <th className="px-3 py-2 text-right">TIP</th>
+                <th className="px-3 py-2 text-center">渠道</th>
                 <th className="px-3 py-2 text-right">优先级费 (SOL)</th>
                 <th className="px-3 py-2 text-right">跟单收益</th>
                 <th className="px-3 py-2 text-center">结果</th>
@@ -336,8 +340,9 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
                         <span
                           className="ml-1 text-xs text-success-500 cursor-help"
                           title={
-                            `jito bundle\n` +
+                            `bundle\n` +
                             `tip: ${b.tip_sol ?? '0'} SOL\n` +
+                            (b.tip_source ? `channel: ${b.tip_source}\n` : '') +
                             `has_alt: ${b.has_alt === true ? '✓' : b.has_alt === false ? '×' : '?'}\n` +
                             (b.bundle_id ? `bundle_id: ${b.bundle_id}\n` : '') +
                             (b.bundle_size && b.bundle_size > 1
@@ -359,6 +364,9 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
                     </td>
                     <td className="px-3 py-2 text-right">
                       <SolAmount value={b.tip_sol} />
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      <TipSourceBadge value={b.tip_source} />
                     </td>
                     <td className="px-3 py-2 text-right">
                       <PrioSolAmount value={b.prio_lamports} />

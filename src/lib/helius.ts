@@ -328,7 +328,15 @@ export class HeliusClient {
 
   /** 删除 Webhook */
   async deleteWebhook(webhookID: string): Promise<void> {
-    await this.http.delete(`/v0/webhooks/${webhookID}/`);
+    // 关键：DELETE 不能带 application/json + 空 body，否则 Helius 那边会报
+    //       "Unexpected token 'n', \"null\" is not valid JSON"（HTTP 400）。
+    // 这里显式把 Content-Type 置空 + 用 fetch 跳过 axios 的默认 JSON 解析。
+    const url = `${HELIUS_BASE}/v0/webhooks/${webhookID}/?api-key=${encodeURIComponent(this.apiKey)}`;
+    const res = await fetch(url, { method: 'DELETE' });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
+    }
   }
 
   /** 给 Webhook 增删地址（Helius PUT 需要完整 webhook 对象） */

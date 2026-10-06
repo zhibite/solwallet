@@ -158,9 +158,17 @@ export function rpcTxView(tx: TransactionResponse | null): TxView | null {
 //  Helius 增强 API 实现：配额恢复后可用
 // ============================================================
 
-/** 本人在交易里的账户：feePayer 一定是自己，relayer 代付时钱包余额也会变 */
+/**
+ * 取 SOL 净变动时要纳入的账户集合。
+ *
+ * 之前这里在 feePayer != wallet 时把 feePayer 也加进去，结果把 relayer / Jito 收 tip 的那一刻
+ * （feePayer = 收 tip 那个账户）算成了 trader 的 solOut，**买入成本虚高 0.001 SOL**。
+ *
+ * 修正：只看 wallet 自己的 SOL 进出。feePayer == wallet 的常见场景下行为不变；
+ * relayer 代付场景下，relayer 的 fee / tip 不再污染 trader 的 pnl。
+ */
 function ownersOf(tx: HeliusEnhancedTx, wallet: string): string[] {
-  return tx.feePayer === wallet ? [tx.feePayer] : [tx.feePayer, wallet];
+  return [wallet];
 }
 
 export function heliusTxView(tx: HeliusEnhancedTx | null): TxView | null {

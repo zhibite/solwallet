@@ -11,7 +11,7 @@
  */
 
 import { query, queryOne, withTransaction } from './db';
-import { getHelius, isHeliusConfigured } from './helius';
+import { getHelius, isHeliusConfigured, parsedEventItemToEnhanced, type ParsedEventItem } from './helius';
 import { getMultiRpc } from './multi-rpc';
 import { parseHeliusTx } from './parser';
 import { saveBlockAnalysis } from './first-sniper';
@@ -91,41 +91,71 @@ async function pollAllTargets() {
   for (const t of targets) {
     try {
       const sigs = await rpc.getSignaturesForAddress(t.address, 20);
+      if (sigs.length === 0) continue;
+
+      // 1) 过滤 s.err（RPC 已标记失败，没必要再去 Helius 解析一次）
+      const goodSigs = sigs.filter((s) => !s.err);
+      if (goodSigs.length === 0) continue;
+
+      // 2) 一次 SELECT ANY 查重（替代原来的 per-sig SELECT，DB 调用量降到 1/N）
+      const existingRows = await query<{ signature: string }>(
+        'SELECT signature FROM target_trades WHERE signature = ANY($1::text[])',
+        [goodSigs.map((s) => s.signature)],
+      );
+      const existingSet = new Set(existingRows.map((r) => r.signature));
+      const toParse: Array<{ signature: string; blockTime: number }> = [];
+      for (const s of goodSigs) {
+        if (existingSet.has(s.signature)) continue;
+        toParse.push({ signature: s.signature, blockTime: s.blockTime });
+      }
+      if (toParse.length === 0) continue;
+
+      // 3) 批量解析（一发入 Helius，10 cr/request，与签名数无关）
+      //    替代原来的 per-sig parseTransactionWithFallback：HTTP 请求数从 N 降到 1，
+      //    Helius 配额消耗从 ~10N cr 降到 ~10 cr（18x 节省）；
+      //    失败回退到公共 RPC 单笔解析被砍掉——批量回退等于批量劣化回原状，整批重试让
+      //    DB 主键去重 + 下轮轮询（默认 5s）兜底，单次 429 只会让整批延迟一轮，无数据丢失。
+      let parsedItems: ParsedEventItem[];
+      try {
+        parsedItems = await helius.parseEvents(toParse.map((p) => p.signature));
+      } catch (perr: any) {
+        const status = perr?.response?.status ?? perr?.status;
+        if (status === 429) {
+          // 整批限流 → 整批跳过，DB 主键去重保证下轮会重扫到同一批 sigs
+          console.warn(
+            `[monitor] Helius 429 on target ${t.address.slice(0, 8)}… — skip batch of ${toParse.length} sigs, retry next poll`,
+          );
+        } else {
+          // 其它错误（5xx/网络）也直接跳过本批，下轮重试
+          console.warn(
+            `[monitor] parseEvents batch failed on target ${t.address.slice(0, 8)}…: ${perr?.message ?? perr}`,
+          );
+        }
+        continue;
+      }
+
+      // 顺序与请求一致。长度不一致（Helius 截断/重复响应）→ 尾部 sigs 下轮重扫，DB 主键去重兜底
+      if (parsedItems.length !== toParse.length) {
+        console.warn(
+          `[monitor] parseEvents length mismatch: requested ${toParse.length} got ${parsedItems.length} on target ${t.address.slice(0, 8)}… — trailing sigs re-fetched next poll`,
+        );
+      }
+
+      // 4) 顺序与请求一致，逐个适配 → parseHeliusTx → threshold → 入库
       let recordedCount = 0; // 本轮实际入 buy 的数量
       let recordedBlockTime: number | null = null; // 最近一笔被记录的 buy 的 blockTime
-      // 整批解析遇 429（Helius 配额打满）→ 短退避一次，避免雪崩重试
-      let parseBackoffMs = 0;
-      for (const s of sigs) {
-        if (s.err) continue;
-        // 已存在则跳过
-        const existing = await queryOne<{ id: number }>(
-          'SELECT id FROM target_trades WHERE signature = $1',
-          [s.signature],
-        );
-        if (existing) continue;
-
-        // 单 sig 解析失败（429/网络）→ 跳过这一个,继续下一个。
-        // 这条把"Helius 限流 → 整个 target poll 瘫痪"修掉,只丢当批未解析的 sigs,
-        // 下次轮询 (默认 15s) 会再扫到同一批未入库的 sigs,DB 主键去重保证不重复入库。
-        // parseTransactionWithFallback: Helius Parsed Events 优先 (10 cr/批),
-        // 失败/限流时自动回退到 6 个公共 RPC + 自适配 parser,Helius 被打满也不会丢解析能力。
-        let tx: Awaited<ReturnType<typeof helius.parseTransactionWithFallback>> = null;
-        try {
-          if (parseBackoffMs > 0) await new Promise((r) => setTimeout(r, parseBackoffMs));
-          tx = await helius.parseTransactionWithFallback(s.signature);
-          parseBackoffMs = 0;
-        } catch (perr: any) {
-          const status = perr?.response?.status ?? perr?.status;
-          if (status === 429) {
-            // 整批打满 → 退避 8s,本批剩余 sigs 全部跳过
-            parseBackoffMs = 8_000;
-            console.warn(`[monitor] Helius 429 on target ${t.address.slice(0, 8)}… — skip remaining ${sigs.length - sigs.indexOf(s) - 1} sigs, retry next poll`);
-            break;
-          }
-          // 其它错误（5xx/网络）→ 跳过这一个继续
-          console.warn(`[monitor] parseTransaction ${s.signature.slice(0, 12)}… failed: ${perr?.message ?? perr}`);
+      for (let i = 0; i < parsedItems.length; i++) {
+        const item = parsedItems[i];
+        const meta = toParse[i];
+        if (!item || !meta) continue;
+        // parserStatus === 'ERROR' → 单笔解析失败，跳过这一笔，其他正常（留 warn 便于排查）
+        if (item.parserStatus !== 'OK' || !item.parsed) {
+          console.warn(
+            `[monitor] parseEvents item failed: ${meta.signature.slice(0, 12)}… parserStatus=${item.parserStatus} on target ${t.address.slice(0, 8)}…`,
+          );
           continue;
         }
+        const tx = parsedEventItemToEnhanced(item);
         if (!tx) continue;
         const buy = parseHeliusTx(tx);
         if (!buy) continue;
@@ -134,8 +164,8 @@ async function pollAllTargets() {
         // 写库
         await ingestTargetTrade(t.id, buy, tx);
         recordedCount++;
-        // 用被录入的那笔的 blockTime，没拿到就用签名列表的头条
-        recordedBlockTime = (buy.blockTime && buy.blockTime > 0) ? buy.blockTime : s.blockTime;
+        // 用被录入的那笔的 blockTime，没拿到就用签名列表的 blockTime
+        recordedBlockTime = (buy.blockTime && buy.blockTime > 0) ? buy.blockTime : meta.blockTime;
       }
       // 只在真正入 buy 时才更新 last_buy_at；避免「拉到卖出/转账就把 last_buy_at 推高」的误导
       if (recordedCount > 0 && recordedBlockTime) {
@@ -157,17 +187,19 @@ export async function ingestTargetTrade(targetId: number, buy: any, rawTx: any) 
   // 1) 写 target_trades（COALESCE 兜底，防止 blockTime 为 0/undefined 时 to_timestamp 失败）
   //    用 xmax=0 判定「真实新增」——ON CONFLICT DO UPDATE 触发的更新 xmax ≠ 0
   //    新增 bundle 元数据（has_alt / bundle_id），bundle_size 由同 bundle 的其他 tx 聚合后回填
+  //    0010: tip_source 由 parser.ts 从 SOLANA_TIP_SOURCE_MAP 映射得到，监控时落库
   const inserted = await queryOne<{ id: number; was_inserted: boolean }>(`
     INSERT INTO target_trades (
       target_id, signature, slot, block_time, mint, target_address,
       buy_sol, target_tip_sol, target_prio_lamports, is_bundled, version,
-      has_alt, bundle_id
-    ) VALUES ($1,$2,$3,to_timestamp(COALESCE(NULLIF($4, 0), EXTRACT(epoch FROM NOW()))),$5,$6,$7,$8,$9,$10,$11,$12,$13)
+      has_alt, bundle_id, tip_source
+    ) VALUES ($1,$2,$3,to_timestamp(COALESCE(NULLIF($4, 0), EXTRACT(epoch FROM NOW()))),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
     ON CONFLICT (signature) DO UPDATE SET
       slot = EXCLUDED.slot,
       is_bundled = EXCLUDED.is_bundled,
       has_alt = EXCLUDED.has_alt,
-      bundle_id = COALESCE(EXCLUDED.bundle_id, target_trades.bundle_id)
+      bundle_id = COALESCE(EXCLUDED.bundle_id, target_trades.bundle_id),
+      tip_source = COALESCE(EXCLUDED.tip_source, target_trades.tip_source)
     RETURNING id, (xmax = 0) AS was_inserted
   `, [
     targetId,
@@ -183,6 +215,7 @@ export async function ingestTargetTrade(targetId: number, buy: any, rawTx: any) 
     buy.version,
     buy.hasAlt,
     buy.bundleId,
+    buy.tipSource,
   ]);
 
   if (!inserted) return;

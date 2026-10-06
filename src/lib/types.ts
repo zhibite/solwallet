@@ -4,6 +4,21 @@
 
 export type TargetStatus = 'active' | 'paused';
 
+/**
+ * Solana tip 渠道分类。同一笔 buy 可能走不同 tip 服务，
+ * 因此光看 tip_sol 金额无法判断渠道——必须用收款地址映射。
+ *
+ * 收款地址 → 渠道的映射表：src/lib/parser.ts 的 SOLANA_TIP_SOURCE_MAP。
+ *
+ *   - 'jito'           : Jito（mainnet.block-engine.jito.wtf 的 8 个 tip account）
+ *   - 'helius_sender'  : Helius Sender（多通路：Jito/Harmonic/Rakurai 走同一个 tip 账户池）
+ *   - 'landx'          : LandX（landx.dev 的 10 个 tip account，前缀 LandX）
+ *   - 'zero_slot'      : 0slot.trade 的 10 个 tip account
+ *   - 'unknown'        : 付了 tip 但未匹配任何已知渠道（新通道 / 链上数据补）
+ *   - null/undefined   : 该笔未付 tip（不是任何 tip 通道；普通 v0 tx / 纯 prio 通道）
+ */
+export type TipSource = 'jito' | 'helius_sender' | 'landx' | 'zero_slot' | 'unknown';
+
 export interface MonitoredTarget {
   id: number;
   address: string;
@@ -41,6 +56,11 @@ export interface TargetTrade {
   has_alt: boolean | null;
   /** 0008: 同 bundle 多笔共享的 ID */
   bundle_id: string | null;
+  /**
+   * 0010: tip 收款渠道（从 SOLANA_TIP_SOURCE_MAP 映射得出）。
+   * null = 该笔未付 tip；非 null = 走的是哪个 tip 通道。
+   */
+  tip_source: TipSource | null;
   /**
    * 0008: 同 bundle_id 在 target_trades 表内的行数。
    * 注意：≠ Solana bundle 内总 tx 数（monitor 只记录目标 wallet 的买入）；
@@ -108,6 +128,8 @@ export interface BlockBuyer {
   bundle_id: string | null;
   /** 0008: 同 bundle 内的笔数（≥2 才有意义） */
   bundle_size: number | null;
+  /** 0010: 该笔走的 tip 通道（null = 未付 tip） */
+  tip_source: TipSource | null;
   /** 0007: 这笔买入收到的 token 数量，单笔跟单收益按它做 FIFO 配对 */
   token_amount: string | null;
   /** 0007: open=持仓中 / closed=已平仓 / partial=部分平仓 / buy_failed=买入失败 */

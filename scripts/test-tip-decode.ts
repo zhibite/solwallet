@@ -1,20 +1,18 @@
 // scripts/test-tip-decode.ts
 // 验证 fix：从 RPC 原始 block 解出 first_sniper 的 tip/prio
 import { getMultiRpc } from '../src/lib/multi-rpc';
-import { parseBlockTxs, solanaTxToHeliusEnhanced, calcJitoTip, calcPriorityFee } from '../src/lib/parser';
+import {
+  parseBlockTxs,
+  solanaTxToHeliusEnhanced,
+  calcSolanaTip,
+  calcPriorityFee,
+  parseHeliusTx,
+  SOLANA_TIP_ACCOUNTS,
+  SOLANA_TIP_SOURCE_MAP,
+  getTipSource,
+} from '../src/lib/parser';
 import { query, pool } from '../src/lib/db';
 import { getHelius } from '../src/lib/helius';
-
-const JITO_TIP_ACCOUNTS = new Set([
-  'DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL',
-  'HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe',
-  'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY',
-  '96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5',
-  'ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49',
-  '3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT',
-  'DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh',
-  'ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt',
-]);
 
 async function main() {
   const rpc = getMultiRpc();
@@ -34,7 +32,8 @@ async function main() {
 
     let block: any = null;
     try {
-      block = await rpc.getBlock(slotNum, { transactionDetails: 'full' });
+      // getBlock 只接收 slot 一个参数（multi-rpc 内部已固定 transactionDetails/transactionDetails='full' + maxSupportedTransactionVersion=1）
+      block = await rpc.getBlock(slotNum);
     } catch (e: any) {
       console.log(`  getBlock 失败: ${(e as Error).message}`);
       continue;
@@ -45,13 +44,19 @@ async function main() {
     if (!sniperWrapper) { console.log('  sniper tx 不在这个 block 里'); continue; }
 
     // 1) Helius Enhanced（如果 429 就跳过）
-    let heliusTip = 0, heliusPrio = 0;
+    let heliusTip = 0, heliusPrio = 0, heliusSource: string | null = null;
     try {
       const enhanced = await getHelius().parseEvent(sniperSig);
       if (enhanced) {
-        heliusTip = parseFloat(enhanced.tipSol ?? '0');
-        heliusPrio = enhanced.prioLamports ?? 0;
-        console.log(`  [Helius Enhanced] tip=${heliusTip} prio=${heliusPrio}`);
+        // parseEvent 返回 HeliusEnhancedTx（fee / nativeTransfers 等），不直接含 tipSol/prioLamports
+        // 走 parseHeliusTx 拿标准 ParsedBuy（含 tip / prio / tipSource）
+        const parsed = parseHeliusTx(enhanced);
+        if (parsed) {
+          heliusTip = parsed.tipSol;
+          heliusPrio = parsed.prioLamports;
+          heliusSource = parsed.tipSource;
+        }
+        console.log(`  [Helius Enhanced] tip=${heliusTip} prio=${heliusPrio} source=${heliusSource ?? 'null'}`);
       }
     } catch (e: any) {
       console.log(`  [Helius Enhanced] 失败: ${e.message?.slice(0,60)}`);
@@ -68,7 +73,7 @@ async function main() {
       transaction: sniperWrapper.transaction,
       meta: sniperWrapper.meta,
     } as any);
-    const directTip = enhanced ? calcJitoTip(enhanced) : 0;
+    const directTip = enhanced ? calcSolanaTip(enhanced) : 0;
     const directPrio = enhanced ? calcPriorityFee(enhanced) : 0;
 
     console.log(`  [fix 后 parseBlockTxs]       tip=${sniperParsed?.tipSol}  prio=${sniperParsed?.prioLamports}  buy=${sniperParsed?.buySol}`);
@@ -76,12 +81,16 @@ async function main() {
     console.log(`  meta.fee = ${sniperWrapper.meta?.fee}`);
 
     if (enhanced?.nativeTransfers) {
-      const jitoOnes = enhanced.nativeTransfers.filter((nt: any) => JITO_TIP_ACCOUNTS.has(nt.toUserAccount));
-      console.log(`  nativeTransfers 总 ${enhanced.nativeTransfers.length} 条，其中 jito tip ${jitoOnes.length} 条`);
+      const jitoOnes = enhanced.nativeTransfers.filter((nt: any) => SOLANA_TIP_ACCOUNTS.has(nt.toUserAccount));
+      console.log(`  nativeTransfers 总 ${enhanced.nativeTransfers.length} 条，其中任意 tip channel ${jitoOnes.length} 条`);
       for (const nt of jitoOnes) {
         const lamports = typeof nt.amount === 'string' ? Number(nt.amount) : nt.amount;
-        console.log(`    JITO  ${nt.fromUserAccount.slice(0,8)} → ${nt.toUserAccount.slice(0,8)}  ${lamports} lamports (${lamports / 1e9} SOL)`);
+        const src = getTipSource(nt.toUserAccount) ?? 'unknown';
+        console.log(
+          `    ${src.padEnd(11)}  ${nt.fromUserAccount.slice(0,8)} → ${nt.toUserAccount.slice(0,8)}  ${lamports} lamports (${lamports / 1e9} SOL)`,
+        );
       }
+      console.log(`  SOLANA_TIP_SOURCE_MAP 总条数 = ${Object.keys(SOLANA_TIP_SOURCE_MAP).length}`);
     }
     console.log();
   }

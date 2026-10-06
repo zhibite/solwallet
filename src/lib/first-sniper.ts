@@ -27,6 +27,8 @@ export interface AnalyzeBuyer {
   isBundled: boolean;
   hasAlt: boolean | null;
   bundleId: string | null;
+  /** 0010: tip 渠道（null = 没付 tip；'unknown' = 付了但地址不在 4 通道列表里） */
+  tipSource: import('./types').TipSource | null;
   mark: 'first_sniper' | 'target' | 'follower' | 'own' | 'pre_target';
 }
 
@@ -191,6 +193,7 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
       isBundled: e.buy.isBundled,
       hasAlt: e.buy.hasAlt ?? null,
       bundleId: e.buy.bundleId ?? null,
+      tipSource: e.buy.tipSource ?? null,
       mark,
     };
   });
@@ -219,7 +222,7 @@ async function fetchBuyBySig(signature: string): Promise<ParsedBuy | null> {
            target_tip_sol AS tip_sol, target_prio_lamports AS prio_lamports, 'success'::text AS success,
            target_token_amount AS token_amount,
            COALESCE(version, 'legacy') AS version, COALESCE(is_bundled, false) AS is_bundled,
-           has_alt, bundle_id, '' AS source
+           has_alt, bundle_id, '' AS source, tip_source
     FROM target_trades WHERE signature = $1
   `, [signature]);
   if (!row) return null;
@@ -239,6 +242,7 @@ async function fetchBuyBySig(signature: string): Promise<ParsedBuy | null> {
     hasAlt: row.has_alt ?? null,
     bundleId: row.bundle_id ?? null,
     source: row.source,
+    tipSource: row.tip_source ?? null,
     success: row.success === 'success',
   };
 }
@@ -300,8 +304,8 @@ export async function saveBlockAnalysis(
            signature, address, buy_sol, tip_sol, prio_lamports, token_amount,
            is_first_sniper, is_follower, is_own, is_pre_target,
            result, version, is_bundled,
-           has_alt, bundle_id
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
+           has_alt, bundle_id, tip_source
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
         [
           analysisId,
           b.slotOffset === 0 ? slot : slot + 1,
@@ -324,6 +328,7 @@ export async function saveBlockAnalysis(
           b.isBundled,
           b.hasAlt,
           b.bundleId,
+          b.tipSource,
         ],
       );
       if (b.bundleId) {

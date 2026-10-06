@@ -51,6 +51,7 @@ export async function GET(req: NextRequest) {
            b_first.slot AS first_sniper_slot,
            b_first.signature AS first_sniper_buyer_signature,
            b_first.offset_ms AS first_sniper_offset_ms,
+           b_first.tip_source AS first_sniper_tip_source,
            b_own.block_index AS my_block_index,
            b_own.tip_sol::text AS my_tip_sol,
            b_own.prio_lamports AS my_prio_lamports,
