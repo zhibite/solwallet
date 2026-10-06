@@ -13,6 +13,7 @@ export async function GET(req: NextRequest) {
     const promoted = searchParams.get('promoted');
     const minFreq = searchParams.get('min_freq');
     const isAkbot = searchParams.get('akbot');
+    const address = searchParams.get('address') ?? undefined;
     const sortBy = (searchParams.get('sort') ?? 'freq') as 'freq' | 'score' | 'seen';
     const limit = parseInt(searchParams.get('limit') ?? '100', 10);
     const offset = parseInt(searchParams.get('offset') ?? '0', 10);
@@ -23,6 +24,7 @@ export async function GET(req: NextRequest) {
         promoted: promoted === 'true' ? true : promoted === 'false' ? false : undefined,
         minFreq: minFreq ? parseInt(minFreq, 10) : undefined,
         isAkbot: isAkbot === 'true' ? true : isAkbot === 'false' ? false : undefined,
+        address,
         sortBy,
         offset,
         limit,
@@ -32,6 +34,7 @@ export async function GET(req: NextRequest) {
         promoted: promoted === 'true' ? true : promoted === 'false' ? false : undefined,
         minFreq: minFreq ? parseInt(minFreq, 10) : undefined,
         isAkbot: isAkbot === 'true' ? true : isAkbot === 'false' ? false : undefined,
+        address,
       }),
       getPoolStats(),
     ]);

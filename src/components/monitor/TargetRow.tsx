@@ -18,6 +18,24 @@ interface Target {
   record_count: number;
   last_buy_at: string | null;
   updated_at: string;
+  /**
+   * 来自 /api/targets 的 LATERAL JOIN：最近一笔 first_sniper 不为 null 的 trade。
+   * 用来在未展开 row 的情况下也能直接渲染"最近一次第一个狙击者"列。
+   * —— 见 MonitorList 里同名字段的说明。
+   */
+  last_sniper?: {
+    address: string;
+    signature: string;
+    offset_pos: number | null;
+    offset_ms: number | null;
+    tip_sol: string | null;
+    prio_lamports: number | null;
+    buy_sol: string | null;
+    tip_source: import('@/lib/types').TipSource | null;
+    slot: number;
+    mint: string;
+    block_time: string;
+  } | null;
 }
 
 interface Trade {
@@ -68,10 +86,25 @@ interface Props {
   onDelete: (t: Target) => void;
   onClear: (t: Target) => void;
   onThresholdChange: (id: number, val: number) => void;
-  decisionCell?: React.ReactNode;
+  /**
+   * 该目标的跟单决策（推荐 tip+prio / 评分 / 收益 / 胜率）。
+   * undefined = 还在算 / 还没样本，由 TargetRow 决定具体行渲染。
+   */
+  decision?: {
+    worth_score: number | null;
+    win_rate: number;
+    avg_pnl_sol: number;
+    p50_tip_sol: number;
+    p50_prio_lamports: number;
+    p75_tip_sol: number;
+    p75_prio_lamports: number;
+    success_count: number;
+    failed_count: number;
+    sample_size: number;
+  };
 }
 
-export default function TargetRow({ target, onPause, onResume, onDelete, onClear, onThresholdChange, decisionCell }: Props) {
+export default function TargetRow({ target, onPause, onResume, onDelete, onClear, onThresholdChange, decision }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [sniperExpanded, setSniperExpanded] = useState(false);
   const [sniperKey, setSniperKey] = useState<{ slot: number; mint: string } | null>(null);
@@ -79,6 +112,13 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
   const [loadingTrades, setLoadingTrades] = useState(false);
   const [editingThreshold, setEditingThreshold] = useState(false);
   const [thresholdVal, setThresholdVal] = useState(target.threshold_sol);
+
+  // 同步：target.threshold_sol 变化时（保存后 refetch、其它入口修改、暂停/恢复等），
+  // 同步刷新本地编辑态。否则在单元格点击编辑时，输入框里残留的是上一次的输入
+  // （甚至清空后的 ""），不是"这条 target 的当前真实阈值"。
+  useEffect(() => {
+    setThresholdVal(target.threshold_sol);
+  }, [target.threshold_sol]);
 
   // 首狙展开：内联显示该 trade 对应 slot+mint 的 block 级详情
 
@@ -136,8 +176,34 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
   // 第一个狙击者信息（从最近一笔 buy 拿）
   const latest = trades?.[0];
 
+  /**
+   * 优先用 /api/targets 自带的 last_sniper（最近一笔 first_sniper 不为 null 的 trade），
+   * 这样 row 没展开也能直接看到上次的狙击者——而不是「最新一笔 trade」（最新那一笔往往
+   * sniper 还在分析中、first_sniper 还是 null，或者 target 本身就是第一个买入没被抢）。
+   * 取值优先级：target.last_sniper > trades?.[0] > null
+   */
+  const sniper = target.last_sniper
+    ? {
+        first_sniper: target.last_sniper.address,
+        first_sniper_signature: target.last_sniper.signature,
+        first_sniper_offset_pos: target.last_sniper.offset_pos,
+        first_sniper_offset_ms: target.last_sniper.offset_ms,
+        first_sniper_tip_sol: target.last_sniper.tip_sol,
+        first_sniper_prio_lamports: target.last_sniper.prio_lamports,
+        first_sniper_buy_sol: target.last_sniper.buy_sol,
+        first_sniper_tip_source: target.last_sniper.tip_source,
+        first_sniper_slot: target.last_sniper.slot,
+        first_sniper_buyer_signature: target.last_sniper.signature,
+        slot: target.last_sniper.slot,
+        mint: target.last_sniper.mint,
+        block_time: target.last_sniper.block_time,
+        // 这个 cell 不展开时 next_slot_count 没意义；展开时用户看的是 latest trade 的
+        next_slot_count: latest?.next_slot_count ?? 0,
+      }
+    : latest;
+
   // 失败判定：找不到首狙、或首狙 offset 计算不出来（同 slot 没抢到、只在下一 slot 跟随）
-  const sniperFailed = !!latest && (!latest.first_sniper || latest.first_sniper_offset_pos === null);
+  const sniperFailed = !!sniper && (!sniper.first_sniper || sniper.first_sniper_offset_pos === null);
 
   // 格式化"TX +X"展示
   const renderOffset = (pos: number | null | undefined) => {
@@ -165,16 +231,29 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
     );
   };
 
+  // 时间戳格式：MM-DD HH:mm:ss（参考目标行的"最新 buy"列）
+  const formatTime = (iso: string) => {
+    const d = new Date(iso);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  };
+
   return (
     <>
       <tr className="border-b border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-zinc-700/50">
-        <td className="px-3 py-3">
-          <div className="flex items-center gap-2">
-            <button onClick={toggleExpand} className="text-gray-500 dark:text-gray-400">
+        <td className="px-3 py-3 w-40 max-w-40">
+          <div className="flex items-center gap-2 min-w-0">
+            <button onClick={toggleExpand} className="text-gray-500 dark:text-gray-400 shrink-0">
               {expanded ? <ChevronUpIcon className="w-4 h-4" /> : <ChevronDownIcon className="w-4 h-4" />}
             </button>
             <AddressCopy address={target.address} />
-            {target.label && <span className="text-xs text-gray-500 dark:text-gray-400">({target.label})</span>}
+            {/* pool:xxx / auto:xxx 标签分别是 BFS 自动 promote / 自动晋升时塞进
+                monitored_targets.label 的来源标记，对监控运营没有参考价值，
+                只会让「监控目标」列变宽，所以这里统一隐藏。
+                其他用户手动打的标签照常显示。 */}
+            {target.label && !target.label.startsWith('pool:') && !target.label.startsWith('auto:') && (
+              <span className="text-xs text-gray-500 dark:text-gray-400 truncate">({target.label})</span>
+            )}
           </div>
         </td>
         <td className="px-3 py-3">
@@ -193,7 +272,12 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
             </div>
           ) : (
             <button
-              onClick={() => setEditingThreshold(true)}
+              onClick={() => {
+                // 每次进入编辑都从最新 target 同步一下，避免 useEffect 还没跑或父组件传来旧值时
+                // 输入框停留在上一次输入（甚至清空后的空值）。
+                setThresholdVal(target.threshold_sol);
+                setEditingThreshold(true);
+              }}
               className="font-mono text-xs text-gray-700 dark:text-gray-300 hover:text-brand-500"
             >
               {parseFloat(target.threshold_sol).toFixed(4)}
@@ -220,51 +304,89 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
         <td className="px-3 py-3">
           <RelativeTime iso={target.last_buy_at} />
         </td>
-        <td className="px-3 py-3">
-          {latest && latest.first_sniper && !sniperFailed ? (
+        <td className="px-3 py-3 min-w-[320px]">
+          {sniper ? (
             <div
               role="button"
               tabIndex={0}
               onClick={toggleSniperPanel}
               onKeyDown={(e) => e.key === 'Enter' && toggleSniperPanel()}
-              className={`text-left text-xs space-y-0.5 rounded-md px-1 py-0.5 -mx-1 hover:bg-slate-100 dark:hover:bg-zinc-700/60 transition-colors cursor-pointer ${
+              className={`flex flex-wrap items-center gap-x-2 gap-y-1 text-xs rounded-md px-1.5 py-1 -mx-1.5 hover:bg-slate-100 dark:hover:bg-zinc-700/60 transition-colors cursor-pointer ${
                 sniperExpanded ? 'bg-brand-50 dark:bg-brand-500/10' : ''
               }`}
               title="点击展开该 slot 的 block 级详情"
             >
-              <AddressCopy address={latest.first_sniper} />
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-gray-500 dark:text-gray-400">
-                {renderOffsetMs(latest.first_sniper_offset_ms)}
-                {renderOffset(latest.first_sniper_offset_pos)}
-                <span>
-                  tip <SolAmount value={latest.first_sniper_tip_sol} />
+              {/* 短地址（4...4），点 cell 整体就能展开块内序面板 */}
+              {sniper.first_sniper ? (
+                <AddressCopy address={sniper.first_sniper} length={4} />
+              ) : (
+                <span className="font-mono text-gray-400">-</span>
+              )}
+
+              {/* 状态：抢到 / 落后 / 同步 / 失败 */}
+              {sniperFailed ? (
+                <span
+                  className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-error-50 text-error-700 dark:bg-error-500/15 dark:text-error-400"
+                  title="未在同 slot 抢到首狙（要么 sniper offset 算不出、要么只在下一 slot 跟随）"
+                >
+                  失败
                 </span>
-                <TipSourceBadge value={latest.first_sniper_tip_source} compact />
-                <span className="font-mono">
-                  prio <PrioSolAmount value={latest.first_sniper_prio_lamports} />
+              ) : (
+                renderOffsetMs(sniper.first_sniper_offset_ms)
+              )}
+
+              {/* tip / prio（仅在有首狙且非失败时显示） */}
+              {sniper.first_sniper && !sniperFailed && (
+                <span className="font-mono text-gray-600 dark:text-gray-300">
+                  tip <SolAmount value={sniper.first_sniper_tip_sol} />
+                  <TipSourceBadge value={sniper.first_sniper_tip_source} compact />
+                  {' '}prio <PrioSolAmount value={sniper.first_sniper_prio_lamports} />
                 </span>
-                <span className={`text-[10px] ${sniperExpanded ? 'text-brand-500' : 'text-gray-400'}`}>
-                  {sniperExpanded ? '收起 ▴' : '块内序 ▾'}
+              )}
+
+              {/* 收益：只在样本足够（worth_score != null）且 avg_pnl_sol 非零时显示。
+                    样本不足或 0 收益都直接不渲染（用户反馈：这两类不需要看）。 */}
+              {decision &&
+                decision.worth_score != null &&
+                decision.avg_pnl_sol !== 0 && (
+                  <span className="font-mono text-gray-600 dark:text-gray-300">
+                    收益 <SolAmount value={decision.avg_pnl_sol} signed />
+                  </span>
+                )}
+
+              {/* 块内序 +X */}
+              {!sniperFailed && renderOffset(sniper.first_sniper_offset_pos)}
+
+              {/* 下slot = 跟随者落到了 slot+1 */}
+              {(sniper.next_slot_count ?? 0) > 0 && (
+                <span
+                  className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-warning-50 text-warning-700 dark:bg-warning-500/15 dark:text-warning-400"
+                  title={`下一 slot 还有 ${sniper.next_slot_count} 个跟随者买入`}
+                >
+                  下slot
                 </span>
-              </div>
+              )}
+
+              {/* 块内序 展开/收起 标签（置右） */}
+              <span className={`text-[10px] ml-auto ${sniperExpanded ? 'text-brand-500' : 'text-gray-400'}`}>
+                {sniperExpanded ? '收起 ▴' : '块内序 ▾'}
+              </span>
             </div>
-          ) : sniperFailed ? (
-            <span
-              className="inline-flex items-center px-2 py-0.5 rounded text-xs bg-error-50 text-error-700 dark:bg-error-500/15 dark:text-error-400"
-              title="未在同 slot 抢到首狙（要么 sniper offset 算不出、要么只在下一 slot 跟随）"
-            >
-              失败
-            </span>
           ) : (
             <span className="text-xs text-gray-400">-</span>
           )}
         </td>
-        <td className="px-3 py-3">{decisionCell}</td>
-        <td className="px-3 py-3">
-          <div className="flex items-center gap-1 text-xs">
+        <td className="px-3 py-3 text-right">
+          <div className="flex items-center justify-end gap-1 text-xs">
             <button onClick={toggleExpand} className="text-gray-500 dark:text-gray-400 hover:text-brand-500">{expanded ? '收起' : '展开'}</button>
             <span className="text-gray-300">|</span>
-            <button onClick={() => setEditingThreshold(true)} className="text-gray-500 dark:text-gray-400 hover:text-brand-500">阈值</button>
+            <button
+              onClick={() => {
+                setThresholdVal(target.threshold_sol);
+                setEditingThreshold(true);
+              }}
+              className="text-gray-500 dark:text-gray-400 hover:text-brand-500"
+            >阈值</button>
             <span className="text-gray-300">|</span>
             {target.status === 'active' ? (
               <button onClick={() => onPause(target.id)} className="text-gray-500 dark:text-gray-400 hover:text-warning-500">暂停</button>
@@ -281,7 +403,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
 
       {expanded && (
         <tr>
-          <td colSpan={10} className="bg-gray-50 dark:bg-zinc-700/30 px-6 py-4">
+          <td colSpan={9} className="bg-gray-50 dark:bg-zinc-700/30 px-6 py-4">
             {loadingTrades ? (
               <div className="text-xs text-gray-500 dark:text-gray-400">加载中...</div>
             ) : !trades || trades.length === 0 ? (
@@ -430,7 +552,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
 
       {expanded && sniperExpanded && sniperKey && (
         <tr>
-          <td colSpan={10} className="bg-gray-50 dark:bg-zinc-700/30 px-6 py-4 border-t border-gray-200 dark:border-gray-700">
+          <td colSpan={9} className="bg-gray-50 dark:bg-zinc-700/30 px-6 py-4 border-t border-gray-200 dark:border-gray-700">
             <div className="flex items-center justify-between mb-3">
               <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">
                 Slot {sniperKey.slot} · Mint {sniperKey.mint.slice(0, 6)}…{sniperKey.mint.slice(-4)} 的 block 级买家分布

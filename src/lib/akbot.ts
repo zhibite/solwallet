@@ -156,8 +156,20 @@ export function quickAkbotCheck(address: string): Promise<AkbotCheckResult> {
  *      inconclusive，不再打 Helius。注意「下一轮监控自然会重试」原本不成立：
  *      每轮监控拿到的是该 block 的新买家，被熔断吞掉的旧地址不会再进这个列表。
  *      所以重试责任交给调用方（见 monitor.ts 的 akbotRetryQueue）。
+ *
+ * 2026-10-06 实测：把上限从 2 提到 6 想给 UI 按钮加速，结果是 313s + 48 失败。
+ *   - monitor 同样走这道闸，并发从 2 提到 6 意味着 monitor 的 fire-and-forget 也放 6 倍
+ *   - 6 个 endpoint × 10 rps ≈ 60 rps 总容量，monitor 6 in-flight + UI 6 in-flight
+ *     = 12 × 5 = 60 in-flight，正好把 4 个公共端点全打 429
+ *   - 429 触发 penalize → rps 砍半 → 雪崩：6×5 RPCs 排队等令牌，circuit open 30s × 多次
+ *   - 4 个 paid endpoint 之前用得好好的，因为有 key 现在被 429 是流量分摊问题
+ *   - 想真正提并发得加 Helius（50 rps free tier、akbot 的 `getSignaturesForAddress`
+ *     走它比 6 个公共端点稳），或加更多 paid endpoint，不是单纯调这个数字
  */
-const MAX_CONCURRENT_SCANS = 2;
+const MAX_CONCURRENT_SCANS = Math.max(
+  1,
+  parseInt(process.env.AKBOT_SCAN_CONCURRENCY || '2', 10),
+);
 const BREAK_AFTER_429_MS = 30_000;
 
 let inFlight = 0;
@@ -257,16 +269,17 @@ async function doScanAddressForAkbot(
   // 签名拉取本身失败会抛到调用方；拉回来 0 条是「这个地址链上没交易」，属确定结论。
   if (allSigs.length === 0) return { status: 'clean' };
 
-  // 2) 逐签名拉 tx + 检查 programId
-  //    关键变化：原实现走 Helius Enhanced API（100 cr / 100 sigs / 请求），
-  //    现改为走 multi-rpc.getTransaction（public RPC 优先，0 credits；fallback 到 Helius 1 cr）。
-  //    单签名扫描延迟比批量稍高（顺序处理），但 akbot 用例实时性要求不高（结果仅做 is_akbot 标记）。
-  //    同时省掉 100 cr/batch 的开销，单个地址最多 200 sigs → 200 credits（原 400 cr/200 sigs）。
+  // 2) 批量拉 tx + 检查 programId
+  //    关键变化：原实现走 5000 次串行 getTransaction（每笔一个 HTTP 请求），
+  //    单地址耗时 15-40 分钟。现在走 multi-rpc.getTransactions 走 JSON-RPC batch，
+  //    50 笔/请求，5000 sigs = 100 个 HTTP，单地址降到 30-100 秒。
   let sawParseFailure = false;
-  for (const sigInfo of allSigs) {
+  const txResults = await rpc.getTransactions(allSigs.map((s) => s.signature));
+  for (let i = 0; i < allSigs.length; i++) {
+    const sigInfo = allSigs[i];
+    const tx = txResults[i];
+    if (!tx) continue;
     try {
-      const tx = await rpc.getTransaction(sigInfo.signature);
-      if (!tx) continue;
       if (isAkbotTxFromRpc(tx)) {
         return {
           status: 'found',
@@ -278,24 +291,18 @@ async function doScanAddressForAkbot(
         };
       }
     } catch (err: any) {
-      // multi-rpc 已经做了端点轮换 + 自动退避，最后抛出的错误通常不带 axios 风格的
-      // response.status（web3.js 风格的 Error）。用 message 正则兜底，确保「多端点全
-      // 被打满」时仍能触发熔断并返回 inconclusive。
-      const status = err?.response?.status ?? err?.status;
-      const msg = String(err?.message ?? '');
-      const is429 = status === 429 || /\b429\b/.test(msg) || /rate.?limit/i.test(msg);
-      if (is429) {
-        // 429 之后继续打只会接着 429：既白烧配额又加深堆积。
-        // 直接放弃这个地址剩下的签名，熔断交给外层的闸门处理。
-        tripCircuit();
-        return { status: 'inconclusive', reason: 'rate limited (429)' };
-      }
-      // 单笔解析失败不影响下一笔，但这一笔确实没结论，要记下来
+      // 解析单笔失败（程序崩溃型），记下来但不影响其他笔
       sawParseFailure = true;
-      console.warn('[akbot] getTransaction failed:', (err as Error).message);
+      console.warn('[akbot] tx parse failed:', (err as Error).message);
     }
   }
-  // 有签名解析失败 → 这部分没被检查过，不能宣布「干净」
-  if (sawParseFailure) return { status: 'inconclusive', reason: 'getTransaction failed' };
+  // 整批失败（含 429）已经被 multi-rpc 处理成 null + 熔断；
+  // 这里只关心「拉到 null 但没报错」是不是真没命中——通过 sawParseFailure 区分。
+  // 不过批量模式下我们区分不出"整批 429"和"全部节点都没数据"，保守按 inconclusive。
+  if (txResults.every((tx) => tx === null) && allSigs.length > 0) {
+    return { status: 'inconclusive', reason: 'all txs null' };
+  }
+  // 有解析失败 → 这部分没被检查过，不能宣布「干净」
+  if (sawParseFailure) return { status: 'inconclusive', reason: 'tx parse failed' };
   return { status: 'clean' };
 }

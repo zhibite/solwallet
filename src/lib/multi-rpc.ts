@@ -562,6 +562,212 @@ export class MultiFreeRpc {
     return this.rpc('getTransaction', [sig, { maxSupportedTransactionVersion: 1 }], 5 * 60_000);
   }
 
+  /**
+   * 批量拉交易（JSON-RPC batch）—— 把 N 笔 getTransaction 拼成 1 个 HTTP POST。
+   *
+   * 为什么必须做这个：
+   *   akbot 扫描每个地址最多 5000 笔签名。串行 `getTransaction` 是 5000 次独立 HTTP
+   *   请求，实测 200-500ms/次 → 单地址 15-40 分钟，100 个地址要跑 1-3 天。
+   *   batch 把 50 笔合一次，5000/50 = 100 个 HTTP，单地址降到 30-100 秒，100 个地址
+   *   几十分钟就能跑完。Helius 配额消耗也降一半（单次 batch 算 1 request）。
+   *
+   * 行为对齐 execute / getTransaction：
+   *   - 走 needArchive 选端点（取历史交易只能发给有归档的节点）
+   *   - 熔断/限流/降级退避共用同一套
+   *   - 每笔单独走 cacheKey 缓存（命中不计入 RPC 配额）
+   *   - 部分失败：item 级 error → 该笔留 null 继续；整批 429 → 换端点重试整批
+   */
+  async getTransactions(sigs: string[]): Promise<Array<TransactionResponse | null>> {
+    if (sigs.length === 0) return [];
+    // 去重（外部可能传重复 sig），同时和原 sigs 索引对位
+    const uniq: string[] = [];
+    const seen = new Set<string>();
+    for (const s of sigs) {
+      if (!seen.has(s)) { seen.add(s); uniq.push(s); }
+    }
+
+    // 1) 缓存预热：每 sig 单独查 cache，命中直接占位，不打 RPC
+    const out: Array<TransactionResponse | null | undefined> = new Array(uniq.length);
+    const missIndexes: number[] = [];
+    for (let i = 0; i < uniq.length; i++) {
+      const hit = await Cache.get<TransactionResponse>(cacheKeys.tx(uniq[i]));
+      if (hit !== null && hit !== undefined) {
+        out[i] = hit;
+      } else {
+        missIndexes.push(i);
+      }
+    }
+    if (missIndexes.length === 0) return out as Array<TransactionResponse | null>;
+
+    // 2) 分批拉缺失的 sigs。50 是保守值：Solana 公共节点实测支持 100，
+    //    部分老节点会截断到 50。1 个 HTTP 内 batch 50 sigs 已经能拿到 50x 加速。
+    const BATCH = 50;
+    for (let i = 0; i < missIndexes.length; i += BATCH) {
+      const chunkIdx = missIndexes.slice(i, i + BATCH);
+      const chunkSigs = chunkIdx.map((idx) => uniq[idx]);
+      const results = await this.executeBatch<TransactionResponse | null>(
+        'getTransaction',
+        chunkSigs.map((sig) => [sig, { maxSupportedTransactionVersion: 1 }]),
+      );
+      for (let j = 0; j < chunkIdx.length; j++) {
+        const tx = results[j] ?? null;
+        out[chunkIdx[j]] = tx;
+        if (tx) {
+          // 单笔 5 分钟缓存（和 getTransaction 一致）
+          await Cache.set(cacheKeys.tx(chunkSigs[j]), tx, 300);
+        }
+      }
+    }
+    return out as Array<TransactionResponse | null>;
+  }
+
+  /**
+   * JSON-RPC 批量执行 —— 把 N 个相同 method 的请求拼成 1 个 HTTP POST。
+   *
+   * 失败处理：
+   *   - 整批 429/503 → penalize + 换端点重试整批
+   *   - 整批 401/402 → 端点 dead（配额用尽）
+   *   - 整批 HTTP 错误 / 解析失败 → 换端点重试
+   *   - 单个 item error → 该位置 out[idx]=null，其他保留；不重试单笔（下一批里剩下的
+   *     错误项会被重新发，但 item-level error 通常是参数问题，重发也一样）
+   */
+  private async executeBatch<T>(method: string, paramsList: any[][]): Promise<T[]> {
+    const total = this.endpoints.length;
+    const out: Array<T | null | undefined> = new Array(paramsList.length).fill(undefined);
+    let pending: Set<number> = new Set(paramsList.map((_, i) => i));
+    const rateLimited = new Set<string>();
+    let lastErr: any;
+    // getTransaction 永远需要归档节点；getBlock 同样
+    const needArchive = method === 'getTransaction' || method === 'getBlock';
+    // batch 必须原子：整批重试，不丢任何 pending
+    const deadline = Date.now() + 20_000;
+    let tried = 0;
+    while (pending.size > 0 && tried < total && Date.now() < deadline) {
+      const ep = this.pick(rateLimited, false, needArchive);
+      if (!ep) break;
+      if (!this.consumeToken(ep)) {
+        await new Promise((r) => setTimeout(r, 80));
+        continue;
+      }
+      tried++;
+
+      const idMap = new Map<number, number>(); // JSON-RPC id → pending idx
+      const batch: any[] = [];
+      let nextId = 1;
+      for (const idx of pending) {
+        batch.push({ jsonrpc: '2.0', id: nextId, method, params: paramsList[idx] });
+        idMap.set(nextId, idx);
+        nextId++;
+      }
+
+      const start = Date.now();
+      try {
+        const resp = await fetch(ep.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(batch),
+          // fetch 自带 AbortSignal.timeout 在 Node 18+ 可用；超时整批 15s
+          signal: AbortSignal.timeout(15_000),
+        });
+        const ms = Date.now() - start;
+
+        if (resp.status === 429 || resp.status === 503) {
+          this.penalize(ep);
+          rateLimited.add(ep.url);
+          lastErr = new Error(`HTTP ${resp.status}`);
+          continue;
+        }
+        if (resp.status === 401 || resp.status === 402) {
+          if (!ep.dead) {
+            ep.dead = true;
+            ep.deadReason = `HTTP ${resp.status}`;
+            ep.fails = 0;
+            console.warn(`[multi-rpc] ${new URL(ep.url).host} 配额用尽 (batch ${resp.status})`);
+          }
+          rateLimited.add(ep.url);
+          lastErr = new Error(`HTTP ${resp.status}`);
+          continue;
+        }
+        if (!resp.ok) {
+          this.recordResult(ep, false, ms, `HTTP ${resp.status}`);
+          lastErr = new Error(`HTTP ${resp.status}`);
+          await new Promise((r) => setTimeout(r, 200));
+          continue;
+        }
+        const json: any = await resp.json();
+        if (!Array.isArray(json)) {
+          this.recordResult(ep, false, ms, 'batch response not array');
+          lastErr = new Error('batch response not array');
+          continue;
+        }
+
+        // 整批里至少一项 errored（节点对 batch 中某个 item 报 -32xxx）
+        // 这种情况下节点通常还是把成功的项返回了；只把出错的位置标 null，
+        // 成功的就消费掉。剩下的未成功项放回 pending 走下一轮。
+        let anyItemError = false;
+        const successPending = new Set<number>();
+        for (const item of json) {
+          if (!item || typeof item !== 'object' || !idMap.has(item.id)) continue;
+          const idx = idMap.get(item.id)!;
+          if (item.error) {
+            anyItemError = true;
+            out[idx] = null;
+            pending.delete(idx);
+            // 不再重试单笔 item error —— 通常是节点对这个 sig 永久没数据
+          } else {
+            out[idx] = (item.result === undefined ? null : item.result) as T;
+            pending.delete(idx);
+            successPending.add(idx);
+          }
+        }
+
+        // 至少有成功项 → 端点能响应 batch，给个奖励
+        if (successPending.size > 0) {
+          this.recordResult(ep, true, ms);
+        } else {
+          // 全部 item 都没成功（不是 HTTP 错，是 JSON 数组里全是 error）
+          this.recordResult(ep, false, ms, 'all batch items errored');
+        }
+        // 剩余 pending：所有未在本次 response 中出现的 idx（被节点截断的情况）
+        // 走下一轮重试；但如果 anyItemError 触发了整批降级，得 penalize。
+        if (anyItemError && pending.size > 0) {
+          // 部分成功 + 部分 error：保守起见不重试剩下的（避免对已经报错的
+          // sig 反复打节点），直接 null 掉。
+          for (const idx of pending) out[idx] = null;
+          pending.clear();
+        }
+        // 注意：这里没有 break，让外层 while 自然退出（pending 已空或 < deadline）
+      } catch (err: any) {
+        const ms = Date.now() - start;
+        this.recordResult(ep, false, ms, err.message ?? String(err));
+        lastErr = err;
+        if (isRateLimited(err)) {
+          this.penalize(ep);
+          rateLimited.add(ep.url);
+        } else if (isQuotaExhausted(err)) {
+          if (!ep.dead) {
+            ep.dead = true;
+            ep.deadReason = (err.message ?? String(err)).slice(0, 120);
+            ep.fails = 0;
+            console.warn(`[multi-rpc] ${new URL(ep.url).host} 配额用尽 (batch): ${ep.deadReason}`);
+          }
+          rateLimited.add(ep.url);
+        } else {
+          await new Promise((r) => setTimeout(r, 200));
+        }
+      }
+    }
+    // pending 残留 = 整批没法完成（所有端点都 fail）；按「未找到」处理
+    for (const idx of pending) out[idx] = null;
+    if (pending.size > 0) {
+      console.warn(
+        `[multi-rpc] batch ${method} x${paramsList.length} 残留 ${pending.size} 项未完成: ` +
+        (lastErr?.message ?? 'unknown'),
+      );
+    }
+    return out as T[];
+  }
+
   async getSignaturesForAddress(
     address: string,
     limit = 100,

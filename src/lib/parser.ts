@@ -156,8 +156,10 @@ export function calcBuySol(tx: HeliusEnhancedTx): number {
  *   - landx:          https://landx-1.gitbook.io/landx-docs/tip-addresses（10 个，地址前缀 LandX，最低 0.001 SOL）
  *   - zero_slot:      https://0slot.trade（10 个，Advanced 档 0.0001 SOL / 默认档 0.001 SOL）
  *
- * 同一笔 buy 同时付多个通道极少见（如 Helius Sender 的多通路 fan-out），
- * calcSolanaTip / getTipSource 永远取首个命中的通道，余额累加（保证 tip_sol 不漏）。
+ * 同一笔 buy 同时付多个通道极少见（如 Helius Sender 的多通路 fan-out 到多个 sender 账户）。
+ * 拆分规则（见 pickPrimaryTipTransfer 注释）：
+ *   - tipSol（累加所有命中通道）= 仍走 calcSolanaTip 累加，**不漏钱**
+ *   - tipSource / bundleId（"主要通道"）= 按 amount 取最大单笔；多笔相等时取首个
  *
  * 新通道（Harmonic / Rakurai / jitoBAM 等）按以下步骤加：
  *   1) 把新地址放进 SOLANA_TIP_SOURCE_MAP（值 = 渠道名）
@@ -268,6 +270,39 @@ export const SOLANA_TIP_SOURCE_MAP: Readonly<Record<string, import('./types').Ti
 export function getTipSource(addr: string | null | undefined): import('./types').TipSource | null {
   if (!addr) return null;
   return (SOLANA_TIP_SOURCE_MAP as Record<string, import('./types').TipSource>)[addr] ?? null;
+}
+
+/**
+ * 在 nativeTransfers 中挑"主要"的那笔 tip 转账：所有收款方在 4 通道 tip accounts
+ * 集合里的 transfer，按 amount 取最大（数字比较，兼容 Helius 的 string amount）。
+ *
+ * 为什么用"最大"而不是"首个"：
+ *   - Helius Sender 在 Sender Max 模式下会 fan-out 到 8 个 tip accounts（每笔 0.000125 SOL
+ *     × 8 = 0.001 SOL），同 bundle 多笔 tx 选哪个 tip account 是随机的。若用首个，
+ *     tipSource 标签会随机器浮动；用最大单笔能稳定选到同一笔。
+ *   - bundleId 同理：用最大单笔做 hash 比用首个随机 tip account 稳定得多。
+ *   - 计算 tipSol 时仍用 calcSolanaTip 累加所有命中通道，**不受此函数影响**。
+ *
+ * 平局（amount 相等）时退化为首个。
+ */
+export function pickPrimaryTipTransfer(
+  transfers: HeliusEnhancedTx['nativeTransfers'],
+): NonNullable<HeliusEnhancedTx['nativeTransfers']>[number] | null {
+  if (!transfers || transfers.length === 0) return null;
+  const tipTransfers = transfers.filter((t) => SOLANA_TIP_ACCOUNTS.has(t.toUserAccount));
+  if (tipTransfers.length === 0) return null;
+  if (tipTransfers.length === 1) return tipTransfers[0];
+
+  let best = tipTransfers[0];
+  let bestAmt = typeof best.amount === 'string' ? Number(best.amount) : best.amount;
+  for (let i = 1; i < tipTransfers.length; i++) {
+    const amt = typeof tipTransfers[i].amount === 'string' ? Number(tipTransfers[i].amount) : tipTransfers[i].amount;
+    if (amt > bestAmt) {
+      best = tipTransfers[i];
+      bestAmt = amt;
+    }
+  }
+  return best;
 }
 
 /**
@@ -424,9 +459,7 @@ export function txHasAlt(tx: HeliusEnhancedTx): boolean | null {
 export function computeBundleId(tx: HeliusEnhancedTx): string | null {
   if (!tx?.slot) return null;
 
-  const tipAccount = (tx.nativeTransfers ?? []).find((t) =>
-    SOLANA_TIP_ACCOUNTS.has(t.toUserAccount),
-  );
+  const tipAccount = pickPrimaryTipTransfer(tx.nativeTransfers);
   const tipAmount = tipAccount
     ? (typeof tipAccount.amount === 'string' ? Number(tipAccount.amount) : tipAccount.amount)
     : 0;
@@ -472,8 +505,10 @@ export function parseHeliusTx(tx: HeliusEnhancedTx): ParsedBuy | null {
     bundleId: computeBundleId(tx),
     source: tx.source ?? '',
     // 0010: tip 收款渠道；命中未知收款地址时写 'unknown'，方便后续 backfill。
+    // 用 pickPrimaryTipTransfer（按 amount 取最大单笔）替代 find，避免 Helius Sender
+    // fan-out 模式下 tipSource 标签在不同机器上随机跳。
     tipSource: (() => {
-      const t = (tx.nativeTransfers ?? []).find((nt) => SOLANA_TIP_ACCOUNTS.has(nt.toUserAccount));
+      const t = pickPrimaryTipTransfer(tx.nativeTransfers);
       if (!t) return null;
       const src = getTipSource(t.toUserAccount);
       return src ?? 'unknown';
@@ -545,9 +580,7 @@ export function parseBlockTxs(
       const isBundledVal = enhanced ? isBundled(enhanced) : false;
       const tipSourceVal = enhanced
         ? (() => {
-            const t = (enhanced.nativeTransfers ?? []).find((nt: any) =>
-              SOLANA_TIP_ACCOUNTS.has(nt.toUserAccount),
-            );
+            const t = pickPrimaryTipTransfer(enhanced.nativeTransfers);
             if (!t) return null;
             return getTipSource(t.toUserAccount) ?? 'unknown';
           })()

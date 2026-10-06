@@ -1,6 +1,5 @@
 "use client";
 import React, { useState, useEffect, useCallback } from "react";
-import PrioSolAmount from "@/components/common/PrioSolAmount";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import AddTargetForm from "./AddTargetForm";
 import TargetRow from "./TargetRow";
@@ -14,6 +13,24 @@ interface Target {
   record_count: number;
   last_buy_at: string | null;
   updated_at: string;
+  /**
+   * 最近一笔 first_sniper 不为 null 的 trade（= 真正被抢过的最新一笔）。
+   * 之所以不直接用「最新一笔 trade」是因为那一笔的 first_sniper 经常是 null：
+   * 刚发生没分析完 / target 本身就是第一个买入的。null 表示"从来没被抢过"或"还没 trade"。
+   */
+  last_sniper?: {
+    address: string;
+    signature: string;
+    offset_pos: number | null;
+    offset_ms: number | null;
+    tip_sol: string | null;
+    prio_lamports: number | null;
+    buy_sol: string | null;
+    tip_source: import('@/lib/types').TipSource | null;
+    slot: number;
+    mint: string;
+    block_time: string;
+  } | null;
   decision?: {
     /** null = 样本不足算不出分，不是 0 分 */
     worth_score: number | null;
@@ -90,7 +107,7 @@ export default function MonitorList() {
       description: (
         <>
           即将删除 <span className="font-mono">{short(t.address)}</span>
-          {t.label && <> （{t.label}）</>} 及其名下的全部 buy 记录，此操作不可撤销。
+          {t.label && !t.label.startsWith('pool:') && !t.label.startsWith('auto:') && <> （{t.label}）</>} 及其名下的全部 buy 记录，此操作不可撤销。
         </>
       ),
       confirmText: '删除',
@@ -185,7 +202,18 @@ export default function MonitorList() {
     }
   };
 
-  const filtered = targets.filter((t) => statusFilter === 'all' || t.status === statusFilter);
+  // 监控列表按「距现在时间」降序：最近买过的目标排前；
+  // last_buy_at 为 null 的目标（从未触发 buy）排到末尾。
+  const filtered = targets
+    .filter((t) => statusFilter === 'all' || t.status === statusFilter)
+    .sort((a, b) => {
+      const ta = a.last_buy_at ? Date.parse(a.last_buy_at) : null;
+      const tb = b.last_buy_at ? Date.parse(b.last_buy_at) : null;
+      if (ta === null && tb === null) return 0;
+      if (ta === null) return 1;   // a 没数据 → 排后
+      if (tb === null) return -1;  // b 没数据 → 排后
+      return tb - ta;              // 降序：越新越靠前
+    });
 
   return (
     <div className="space-y-4">
@@ -252,22 +280,24 @@ export default function MonitorList() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 dark:bg-zinc-800/50 text-xs text-gray-500 dark:text-gray-400">
               <tr>
-                <th className="px-3 py-2 text-left font-medium">监控目标</th>
-                <th className="px-3 py-2 text-left font-medium">阈值</th>
-                <th className="px-3 py-2 text-left font-medium">状态</th>
-                <th className="px-3 py-2 text-center font-medium">记录数</th>
-                <th className="px-3 py-2 text-left font-medium">最新 buy</th>
-                <th className="px-3 py-2 text-left font-medium">距现在</th>
-                <th className="px-3 py-2 text-left font-medium">最近一次 首狙</th>
-                <th className="px-3 py-2 text-left font-medium">决策 (推荐 tip+prio / 评分)</th>
-                <th className="px-3 py-2 text-left font-medium">操作</th>
+                {/* 监控目标：地址仅显 6…6 缩写，固定窄宽让后续列靠左 */}
+                <th className="px-3 py-2 text-left font-medium w-40 whitespace-nowrap">监控目标</th>
+                <th className="px-3 py-2 text-left font-medium whitespace-nowrap">阈值</th>
+                <th className="px-3 py-2 text-left font-medium whitespace-nowrap">状态</th>
+                <th className="px-3 py-2 text-center font-medium whitespace-nowrap">记录数</th>
+                <th className="px-3 py-2 text-left font-medium whitespace-nowrap">最新 buy</th>
+                <th className="px-3 py-2 text-left font-medium whitespace-nowrap">距现在</th>
+                {/* 把「最近一次 首狙」+「决策 (推荐 tip+prio / 评分)」两列合并：
+                    一个目标在一行就能看清「这个狙击者是谁、抢到没、付了多少、跟单建议怎么调」 */}
+                <th className="px-3 py-2 text-left font-medium">最近一次 第一个狙击者</th>
+                <th className="px-3 py-2 text-right font-medium">操作</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={9} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">加载中...</td></tr>
+                <tr><td colSpan={8} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">加载中...</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={9} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">暂无监控目标</td></tr>
+                <tr><td colSpan={8} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">暂无监控目标</td></tr>
               ) : (
                 filtered.map((t) => (
                   <TargetRow
@@ -278,52 +308,13 @@ export default function MonitorList() {
                     onDelete={handleDelete}
                     onClear={handleClear}
                     onThresholdChange={handleThreshold}
-                    decisionCell={<DecisionCell d={t.decision} />}
+                    decision={t.decision}
                   />
                 ))
               )}
             </tbody>
           </table>
         </div>
-      </div>
-    </div>
-  );
-}
-
-function DecisionCell({ d }: { d: Target['decision'] }) {
-  if (!d) return <span className="text-xs text-gray-400">-</span>;
-  // worth_score 为 null = 样本不足算不出分，不是 0 分。判空后再调 toFixed。
-  const s = d.worth_score;
-  const scoreable = s != null;
-  const color = !scoreable ? 'text-gray-400'
-    : s > 1 ? 'text-success-500'
-    : s < -0.5 ? 'text-error-500' : 'text-warning-500';
-  const tipText = d.p75_tip_sol ? d.p75_tip_sol.toFixed(4) : '-';
-  return (
-    <div className="text-xs space-y-0.5">
-      <div className="font-mono">
-        <span className="text-gray-500">P75 tip </span>
-        <span>{tipText}</span>
-        <span className="text-gray-300 mx-1">+</span>
-        <span className="text-gray-500">prio </span>
-        <PrioSolAmount value={d.p75_prio_lamports} />
-      </div>
-      <div className="flex items-center gap-2">
-        <span className={`font-mono font-semibold ${color}`}>
-          {scoreable ? s.toFixed(2) : '-'}
-        </span>
-        {scoreable ? (
-          <span className="text-gray-400">
-            胜率 {(d.win_rate * 100).toFixed(0)}%
-          </span>
-        ) : (
-          <span className="text-xs text-gray-400" title="已实现收益的样本不足 3 笔，暂不评分">
-            样本不足
-          </span>
-        )}
-        {d.sample_size === 0 && scoreable && (
-          <span className="text-xs text-gray-400">手续费无样本</span>
-        )}
       </div>
     </div>
   );

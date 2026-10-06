@@ -146,26 +146,109 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
     });
   }, [params]);
 
-  const promote = async () => {
+  const [monitorThreshold, setMonitorThreshold] = useState<string>('0.5');
+  const [markingAkbot, setMarkingAkbot] = useState(false);
+
+  const refresh = async () => {
     if (!address) return;
-    const ok = await confirm({
-      title: '晋升到监控列表？',
+    const memRes = await fetch(`/api/pool/${address}`).then((r) => r.json());
+    if (memRes.ok) {
+      setMember(memRes.data.member);
+      setFollowing(memRes.data.following ?? []);
+      setFollowers(memRes.data.followers ?? []);
+    }
+  };
+
+  const addToMonitor = async () => {
+    if (!address) return;
+    // 阈值必须是 >= 0 的有限数字；空白走默认 0.5
+    const t = monitorThreshold.trim() === '' ? 0.5 : Number(monitorThreshold);
+    if (!Number.isFinite(t) || t < 0) {
+      await alert({ title: '阈值无效', description: '阈值必须是 ≥ 0 的数字', variant: 'danger' });
+      return;
+    }
+    const confirmMsg = await confirm({
+      title: '加入监控？',
       description: (
         <>
           将 <span className="font-mono">{address.slice(0, 6)}…{address.slice(-4)}</span>{' '}
-          晋升为监控目标，之后会开始按阈值记录它的 buy 交易。
+          加入监控列表，阈值 <span className="font-mono font-semibold">{t} SOL</span>。
+          之后会按这个阈值记录它的 buy 交易。
         </>
       ),
-      confirmText: '晋升',
+      confirmText: '加入监控',
       variant: 'info',
     });
-    if (!ok) return;
-    const res = await fetch(`/api/pool/${address}/promote`, { method: 'POST' });
+    if (!confirmMsg) return;
+    const res = await fetch(`/api/pool/${address}/promote`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ threshold: t }),
+    });
     const json = await res.json();
     if (json.ok) {
-      await alert({ title: '已晋升', variant: 'success' });
+      await alert({ title: '已加入监控', variant: 'success' });
+      refresh();
     } else {
-      await alert({ title: '晋升失败', description: json.reason ?? json.error, variant: 'danger' });
+      await alert({ title: '加入监控失败', description: json.reason ?? json.error, variant: 'danger' });
+    }
+  };
+
+  const toggleAkbot = async () => {
+    if (!address) return;
+    if (member?.is_akbot) {
+      // 撤销
+      const ok = await confirm({
+        title: '撤销 AkBot 标记？',
+        description: (
+          <>
+            清除 <span className="font-mono">{address.slice(0, 6)}…{address.slice(-4)}</span>{' '}
+            的 AkBot 标记（手动撤销）。如果之后 monitor 又检测到它用 akbot 合约卖币，会被重新标回。
+          </>
+        ),
+        confirmText: '撤销',
+        variant: 'warning',
+      });
+      if (!ok) return;
+      setMarkingAkbot(true);
+      try {
+        const res = await fetch(`/api/pool/${address}/akbot`, { method: 'DELETE' });
+        const json = await res.json();
+        if (json.ok) await alert({ title: '已撤销 AkBot 标记', variant: 'success' });
+        else await alert({ title: '撤销失败', description: json.error, variant: 'danger' });
+      } finally {
+        setMarkingAkbot(false);
+        refresh();
+      }
+    } else {
+      // 标记
+      const ok = await confirm({
+        title: '标记为 AkBot？',
+        description: (
+          <>
+            把 <span className="font-mono">{address.slice(0, 6)}…{address.slice(-4)}</span>{' '}
+            手动标为 AkBot 用户。证据会记录为{' '}
+            <span className="font-mono text-xs">manual:&lt;时间戳&gt;</span> 以便和真实 tx 区分。
+          </>
+        ),
+        confirmText: '标记 AkBot',
+        variant: 'warning',
+      });
+      if (!ok) return;
+      setMarkingAkbot(true);
+      try {
+        const res = await fetch(`/api/pool/${address}/akbot`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tagger: 'ui' }),
+        });
+        const json = await res.json();
+        if (json.ok) await alert({ title: '已标记 AkBot', variant: 'success' });
+        else await alert({ title: '标记失败', description: json.error, variant: 'danger' });
+      } finally {
+        setMarkingAkbot(false);
+        refresh();
+      }
     }
   };
 
@@ -193,7 +276,7 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
               {member.role}
             </span>
             {member.promoted_to_target && (
-              <span className="text-xs text-success-500">已晋升监控</span>
+              <span className="text-xs text-success-500">已加入监控</span>
             )}
             {member.is_akbot && (
               <span
@@ -209,14 +292,44 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {!member.promoted_to_target && (
-            <button
-              onClick={promote}
-              className="h-9 px-4 rounded-xl bg-brand-500 hover:bg-brand-600 text-white text-sm font-medium"
-            >
-              晋升到监控
-            </button>
+          {!member.promoted_to_target ? (
+            <div className="flex items-center gap-2">
+              <div className="flex items-center h-9 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-zinc-800 overflow-hidden focus-within:ring-2 focus-within:ring-brand-500/40">
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={monitorThreshold}
+                  onChange={(e) => setMonitorThreshold(e.target.value)}
+                  className="w-20 px-3 py-1 text-right text-gray-800 dark:text-gray-100 bg-transparent outline-none text-sm"
+                  aria-label="监控阈值"
+                  title="监控阈值 (SOL)"
+                />
+                <span className="px-2 text-xs text-gray-400 border-l border-gray-200 dark:border-gray-700">SOL</span>
+              </div>
+              <button
+                onClick={addToMonitor}
+                className="h-9 px-4 rounded-xl bg-brand-500 hover:bg-brand-600 text-white text-sm font-medium whitespace-nowrap"
+              >
+                加入监控
+              </button>
+            </div>
+          ) : (
+            <span className="inline-flex items-center h-9 px-3 rounded-xl bg-success-50 dark:bg-success-500/10 text-success-600 dark:text-success-400 text-sm border border-success-200 dark:border-success-500/30">
+              ✓ 已在监控
+            </span>
           )}
+          <button
+            onClick={toggleAkbot}
+            disabled={markingAkbot}
+            className={`h-9 px-4 rounded-xl text-sm font-medium whitespace-nowrap disabled:opacity-50 ${
+              member.is_akbot
+                ? 'bg-orange-50 hover:bg-orange-100 text-orange-700 dark:bg-orange-500/10 dark:hover:bg-orange-500/20 dark:text-orange-400 border border-orange-200 dark:border-orange-500/30'
+                : 'bg-white hover:bg-gray-50 text-gray-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 dark:text-gray-200 border border-gray-200 dark:border-gray-700'
+            }`}
+          >
+            {member.is_akbot ? '✓ 已标 AkBot（点击撤销）' : '🤖 标 AkBot'}
+          </button>
         </div>
       </div>
 

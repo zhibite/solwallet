@@ -119,6 +119,31 @@ export async function markAsAkbot(
   return rows.length > 0;
 }
 
+/**
+ * 手动撤销 akbot 标记 —— 由 UI 按钮触发。
+ *
+ * 语义：把 is_akbot 置 FALSE 并清空三个证据字段。
+ *   - 必须是池子里的成员（pool_members 有行）才能撤销；不存在就当 noop
+ *   - 用 RETURNING 拿到「之前是不是 akbot」，false → 该地址本来就没标过，不算真撤销
+ *   - 注意：monitor 实时检测会再次把它写回 TRUE（如果该地址之后又用了 akbot program）
+ *     这是想要的 —— 手动撤销是「我看错了/看走了」的纠错，不该抑制自动检测
+ */
+export async function unmarkAsAkbot(address: string): Promise<{ ok: boolean; wasAkbot: boolean }> {
+  if (!address) return { ok: false, wasAkbot: false };
+  const rows = await query<{ is_akbot: boolean }>(
+    `UPDATE pool_members
+        SET is_akbot = FALSE,
+            akbot_detected_at = NULL,
+            akbot_evidence_sig = NULL,
+            akbot_evidence_slot = NULL,
+            updated_at = NOW()
+      WHERE address = $1 AND is_akbot = TRUE
+      RETURNING is_akbot`,
+    [address],
+  );
+  return { ok: true, wasAkbot: rows.length > 0 };
+}
+
 export interface PoolEdge {
   id: number;
   follower: string;
@@ -545,6 +570,13 @@ export async function countPoolMembers(opts: {
   promoted?: boolean;
   minFreq?: number;
   isAkbot?: boolean;
+  /**
+   * 地址模糊匹配 —— 子串查询，**不区分大小写**（ILIKE）。
+   *  - 空字符串 / 全空白 / undefined → 不过滤
+   *  - LIKE 通配符（% _ \）已转义，不会匹配到特殊字符
+   *  - 长度 < 3 时仍然可用，扫描成本可控（pool_members 上 address 是 PK，索引扫描）
+   */
+  address?: string;
 } = {}): Promise<number> {
   const conditions: string[] = ['1=1'];
   const params: any[] = [];
@@ -564,6 +596,10 @@ export async function countPoolMembers(opts: {
     params.push(opts.isAkbot);
     conditions.push(`is_akbot = $${params.length}`);
   }
+  if (opts.address && opts.address.trim() !== '') {
+    params.push(`%${escapeLike(opts.address.trim())}%`);
+    conditions.push(`address ILIKE $${params.length} ESCAPE '\\'`);
+  }
   const row = await queryOne<{ c: string }>(
     `SELECT COUNT(*)::text AS c FROM pool_members WHERE ${conditions.join(' AND ')}`,
     params,
@@ -579,6 +615,7 @@ export async function listPoolMembers(opts: {
   promoted?: boolean;
   minFreq?: number;
   isAkbot?: boolean;
+  address?: string;
   limit?: number;
   offset?: number;
   sortBy?: 'freq' | 'score' | 'seen';
@@ -600,6 +637,10 @@ export async function listPoolMembers(opts: {
   if (opts.isAkbot !== undefined) {
     params.push(opts.isAkbot);
     conditions.push(`is_akbot = $${params.length}`);
+  }
+  if (opts.address && opts.address.trim() !== '') {
+    params.push(`%${escapeLike(opts.address.trim())}%`);
+    conditions.push(`address ILIKE $${params.length} ESCAPE '\\'`);
   }
   const orderCol =
     opts.sortBy === 'score' ? 'worth_score DESC NULLS LAST' :
@@ -625,6 +666,14 @@ export async function listPoolMembers(opts: {
   `, params);
 
   return rows.map(normalizeMember);
+}
+
+/**
+ * 转义 LIKE 子串里三个特殊字符（%、_、\），让用户输入的字符当作字面量。
+ * 内部必须用反斜杠的 PostgreSQL 标准转义：ESCAPE '\'。
+ */
+function escapeLike(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
 }
 
 /**
