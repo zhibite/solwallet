@@ -1,9 +1,11 @@
 "use client";
 import React, { useEffect, useState } from "react";
+import Link from "next/link";
 import AddressCopy from "@/components/common/AddressCopy";
 import SolAmount from "@/components/common/SolAmount";
 import PrioSolAmount from "@/components/common/PrioSolAmount";
 import RelativeTime from "@/components/common/RelativeTime";
+import { useConfirm } from "@/components/ui/confirm-dialog";
 
 interface Row {
   address: string;
@@ -18,6 +20,14 @@ interface Row {
   total_pnl: string | null;
   avg_pnl: string | null;
   last_active: string;
+  // 池子 AkBot 标注——LEFT JOIN pool_members，sniper-only 地址为 (false, null, null, null)
+  is_akbot: boolean;
+  akbot_detected_at: string | null;
+  akbot_evidence_sig: string | null;
+  akbot_evidence_slot: number | null;
+  // 真实监控状态（monitored_targets.status='active'）。与 pool_members.promoted_to_target
+  // 不同：手动加过监控的 sniper 不一定走过 pool promote 流程。
+  is_monitored: boolean;
 }
 
 const SORTS = [
@@ -40,20 +50,27 @@ export default function SniperRankingPage() {
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
-  useEffect(() => {
+  const load = async () => {
     setLoading(true);
-    const from = new Date(Date.now() - 86400_000 * days).toISOString();
-    const offset = (page - 1) * PAGE_SIZE;
-    fetch(`/api/sniper-ranking?from=${from}&limit=${PAGE_SIZE}&offset=${offset}&sort=${sort}`)
-      .then((r) => r.json())
-      .then((j) => {
-        if (j.ok) {
-          setRows(j.data);
-          setTotal(j.total ?? 0);
-        }
-      })
-      .finally(() => setLoading(false));
-  }, [days, sort, page]);
+    try {
+      const from = new Date(Date.now() - 86400_000 * days).toISOString();
+      const offset = (page - 1) * PAGE_SIZE;
+      const res = await fetch(
+        `/api/sniper-ranking?from=${from}&limit=${PAGE_SIZE}&offset=${offset}&sort=${sort}`,
+      );
+      const json = await res.json();
+      if (json.ok) {
+        setRows(json.data);
+        setTotal(json.total ?? 0);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const { confirm, alert } = useConfirm();
+
+  useEffect(() => { load(); }, [days, sort, page]);
 
   // 切换 days/sort 后回到第 1 页
   const handleDaysChange = (v: number) => { setDays(v); setPage(1); };
@@ -66,6 +83,159 @@ export default function SniperRankingPage() {
 
   const start = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
   const end = Math.min(page * PAGE_SIZE, total);
+
+  // ====== 监控 + AkBot 操作 ======
+  // 与 pool page 的 promote / tag / untag 走同一套接口，行为完全一致。
+  // sniper 地址可能根本不在 pool_members（只抢不跟单），promotePoolMember
+  // 会拒绝 ('pool member not found')，所以先 addPoolMember 兜底——INSERT
+  // ON CONFLICT DO UPDATE 的语义，重复调用无副作用。
+
+  const ensurePoolMember = async (address: string) => {
+    // 200/201 视为成功；4xx/5xx 抛错由调用方处理
+    const res = await fetch('/api/pool', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ address }),
+    });
+    const j = await res.json().catch(() => ({} as any));
+    if (!res.ok || !j.ok) throw new Error(j.error || `HTTP ${res.status}`);
+  };
+
+  const promote = async (r: Row) => {
+    if (r.is_monitored) {
+      await alert({
+        title: '已是监控目标',
+        description: (
+          <>
+            <span className="font-mono">{r.address.slice(0, 6)}…{r.address.slice(-4)}</span>{' '}
+            已在监控列表中。
+          </>
+        ),
+        variant: 'info',
+      });
+      return;
+    }
+    const ok = await confirm({
+      title: '加入监控？',
+      description: (
+        <>
+          将 <span className="font-mono">{r.address.slice(0, 6)}…{r.address.slice(-4)}</span>{' '}
+          加入监控列表，默认阈值{' '}
+          <span className="font-mono font-semibold">0.5 SOL</span>。
+        </>
+      ),
+      confirmText: '加入监控',
+      variant: 'info',
+    });
+    if (!ok) return;
+    try {
+      // 先确保在 pool_members（sniper-only 地址可能完全没归过池）
+      await ensurePoolMember(r.address);
+    } catch (e: any) {
+      await alert({ title: '加入监控失败', description: `拉入池子失败: ${e.message ?? e}`, variant: 'danger' });
+      return;
+    }
+    const res = await fetch(`/api/pool/${r.address}/promote`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ threshold: 0.5 }),
+    });
+    const json = await res.json().catch(() => ({} as any));
+    if (json.ok) {
+      await alert({
+        title: '已加入监控',
+        description: (
+          <>
+            <span className="font-mono">{r.address.slice(0, 6)}…{r.address.slice(-4)}</span>{' '}
+            已加入监控列表（阈值 0.5 SOL）。
+          </>
+        ),
+        variant: 'success',
+      });
+      await load();
+      return;
+    }
+    // 并发场景：另一个 tab / 操作员抢先加了。pool page 同样路径，把
+    // 'already a monitored target' 当作"成功"退化处理。
+    if (json.reason === 'already a monitored target') {
+      await alert({
+        title: '已是监控目标',
+        description: `${r.address.slice(0, 6)}…${r.address.slice(-4)} 已被加入监控（并发/其它会话）。`,
+        variant: 'info',
+      });
+      await load();
+      return;
+    }
+    await alert({ title: '加入监控失败', description: json.reason ?? json.error, variant: 'danger' });
+  };
+
+  const tagAkbot = async (r: Row) => {
+    const ok = await confirm({
+      title: '手动标为 AkBot？',
+      description: (
+        <>
+          将 <span className="font-mono">{r.address.slice(0, 6)}…{r.address.slice(-4)}</span>{' '}
+          标记为 AkBot 用户。
+          <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+            狙击次数 {r.snipe_count} · 胜率{' '}
+            {r.win_rate ? `${(parseFloat(r.win_rate) * 100).toFixed(1)}%` : '-'}
+          </div>
+          <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+            标记后若该地址再使用 akbot program，monitor 会保持 akbot 标记。
+          </div>
+        </>
+      ),
+      confirmText: '标记为 AkBot',
+      variant: 'warning',
+    });
+    if (!ok) return;
+    const res = await fetch(`/api/pool/${r.address}/akbot`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tagger: 'ui' }),
+    });
+    const json = await res.json().catch(() => ({} as any));
+    if (json.ok) {
+      await alert({
+        title: '已标记',
+        description: `${r.address.slice(0, 6)}…${r.address.slice(-4)} 已是 AkBot`,
+        variant: 'success',
+      });
+      await load();
+    } else {
+      await alert({ title: '标记失败', description: json.error ?? `HTTP ${res.status}`, variant: 'danger' });
+    }
+  };
+
+  const untagAkbot = async (r: Row) => {
+    const ok = await confirm({
+      title: '撤销 AkBot 标记？',
+      description: (
+        <>
+          将 <span className="font-mono">{r.address.slice(0, 6)}…{r.address.slice(-4)}</span>{' '}
+          撤掉 AkBot 标记。证据会被清空。
+          <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+            证据 sig: {r.akbot_evidence_sig ?? '?'}
+          </div>
+        </>
+      ),
+      confirmText: '撤销标记',
+      variant: 'danger',
+    });
+    if (!ok) return;
+    const res = await fetch(`/api/pool/${r.address}/akbot`, { method: 'DELETE' });
+    const json = await res.json().catch(() => ({} as any));
+    if (json.ok) {
+      await alert({
+        title: '已撤销 AkBot',
+        description: `${r.address.slice(0, 6)}…${r.address.slice(-4)} 已撤销 AkBot 标记`,
+        variant: 'success',
+      });
+      await load();
+    } else {
+      await alert({ title: '撤销失败', description: json.error ?? `HTTP ${res.status}`, variant: 'danger' });
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -121,13 +291,15 @@ export default function SniperRankingPage() {
                 <th className="px-3 py-2 text-right">总 PnL</th>
                 <th className="px-3 py-2 text-right">平均 PnL</th>
                 <th className="px-3 py-2 text-center">最后活跃</th>
+                <th className="px-3 py-2 text-center">AkBot</th>
+                <th className="px-3 py-2 text-center">操作</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={12} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">加载中...</td></tr>
+                <tr><td colSpan={14} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">加载中...</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={12} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">暂无狙击数据。需要先有 block 级分析记录</td></tr>
+                <tr><td colSpan={14} className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400">暂无狙击数据。需要先有 block 级分析记录</td></tr>
               ) : (
                 rows.map((r, idx) => {
                   const winRate = r.win_rate ? parseFloat(r.win_rate) : 0;
@@ -142,7 +314,21 @@ export default function SniperRankingPage() {
                   return (
                     <tr key={r.address} className="border-b border-gray-100 dark:border-gray-700/50 hover:bg-gray-50 dark:hover:bg-zinc-700/30">
                       <td className="px-3 py-2 text-center font-mono text-xs text-gray-500 dark:text-gray-400">{(page - 1) * PAGE_SIZE + idx + 1}</td>
-                      <td className="px-3 py-2"><AddressCopy address={r.address} length={6} /></td>
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-1.5">
+                          <Link href={`/pool/${r.address}`} prefetch={false} className="hover:text-brand-500">
+                            <AddressCopy address={r.address} length={6} />
+                          </Link>
+                          {r.is_akbot && (
+                            <span
+                              className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-orange-50 text-orange-700 dark:bg-orange-500/15 dark:text-orange-400 border border-orange-200/70 dark:border-orange-500/30"
+                              title={`AKBot 用户，证据 sig: ${r.akbot_evidence_sig ?? ''}`}
+                            >
+                              AkBot
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-3 py-2 text-right font-mono text-gray-800 dark:text-white/90">{r.snipe_count}</td>
                       <td className="px-3 py-2 text-right font-mono text-gray-600 dark:text-gray-300">{r.mint_count}</td>
                       <td className="px-3 py-2 text-center">
@@ -164,6 +350,50 @@ export default function SniperRankingPage() {
                       <td className="px-3 py-2 text-right"><SolAmount value={r.total_pnl} signed /></td>
                       <td className="px-3 py-2 text-right"><SolAmount value={r.avg_pnl} signed /></td>
                       <td className="px-3 py-2 text-center"><RelativeTime iso={r.last_active} /></td>
+                      <td className="px-3 py-2 text-center">
+                        {r.is_akbot ? (
+                          <span
+                            className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-orange-50 text-orange-700 dark:bg-orange-500/15 dark:text-orange-400 border border-orange-200/70 dark:border-orange-500/30"
+                            title={`证据 sig: ${r.akbot_evidence_sig ?? ''}`}
+                          >
+                            AkBot
+                          </span>
+                        ) : (
+                          <span className="text-xs text-gray-400">-</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-center">
+                        <div className="inline-flex flex-row items-center gap-2">
+                          {r.is_monitored ? (
+                            <span className="text-xs text-success-500 whitespace-nowrap">✓ 已监控</span>
+                          ) : (
+                            <button
+                              onClick={() => promote(r)}
+                              className="text-xs text-brand-500 hover:underline whitespace-nowrap"
+                              title="加入监控列表，默认阈值 0.5 SOL（与池子页一致）"
+                            >
+                              监控
+                            </button>
+                          )}
+                          {r.is_akbot ? (
+                            <button
+                              onClick={() => untagAkbot(r)}
+                              className="text-[11px] text-gray-400 hover:text-error-500 hover:underline whitespace-nowrap"
+                              title={`撤 AkBot（证据: ${r.akbot_evidence_sig ?? '?'}）`}
+                            >
+                              撤 AkBot
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => tagAkbot(r)}
+                              className="text-[11px] text-orange-500 hover:text-orange-700 hover:underline whitespace-nowrap"
+                              title="手动标为 AkBot 用户（不依赖扫描）"
+                            >
+                              AkBot
+                            </button>
+                          )}
+                        </div>
+                      </td>
                     </tr>
                   );
                 })
@@ -172,8 +402,8 @@ export default function SniperRankingPage() {
           </table>
         </div>
 
-        {/* 分页 */}
-        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-t border-gray-200 dark:border-gray-700 text-sm">
+        {/* 分页 —— 底部居中：上方小字显示范围，水平方向用工具条布局 */}
+        <div className="flex flex-col items-center gap-2 px-4 py-3 border-t border-gray-200 dark:border-gray-700 text-sm">
           <div className="text-xs text-gray-500 dark:text-gray-400">
             {total === 0
               ? '共 0 条'

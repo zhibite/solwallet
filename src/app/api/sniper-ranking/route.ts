@@ -45,6 +45,12 @@ export async function GET(req: NextRequest) {
 
     // 聚合：每个 sniper 地址的统计
     // offset_pos 为负数表示抢在目标之前；越负越早抢到
+    //
+    // LEFT JOIN 池子表拿 is_akbot 标注——sniper-only 地址（从未被归池）会拿到
+    // (false, NULL, NULL, NULL)，UI 仍能展示「非 AkBot」徽章。
+    // LEFT JOIN monitored_targets 拿真实监控状态（status='active'），比
+    // pool_members.promoted_to_target 准：手动添加的监控目标不一定走过 pool
+    // promote 流程，但 is_monitored 仍应为 true。
     const sql = `
       SELECT b.address,
              COUNT(*)                                       AS snipe_count,
@@ -58,12 +64,22 @@ export async function GET(req: NextRequest) {
              AVG(b.offset_pos)::numeric(20, 4)             AS avg_offset,
              SUM(b.pnl_sol)::text                           AS total_pnl,
              AVG(b.pnl_sol)::text                           AS avg_pnl,
-             MAX(ba.block_time)                             AS last_active
+             MAX(ba.block_time)                             AS last_active,
+             COALESCE(pm.is_akbot, false)                   AS is_akbot,
+             pm.akbot_detected_at                           AS akbot_detected_at,
+             pm.akbot_evidence_sig                          AS akbot_evidence_sig,
+             pm.akbot_evidence_slot                         AS akbot_evidence_slot,
+             (mt.id IS NOT NULL)                            AS is_monitored
       FROM block_buyers b
       JOIN block_analyses ba ON ba.id = b.block_analysis_id
+      LEFT JOIN pool_members pm ON pm.address = b.address
+      LEFT JOIN monitored_targets mt
+        ON mt.address = b.address AND mt.status = 'active'
       WHERE b.is_first_sniper = true
         AND ba.block_time >= $1
-      GROUP BY b.address
+      GROUP BY b.address,
+               pm.is_akbot, pm.akbot_detected_at, pm.akbot_evidence_sig, pm.akbot_evidence_slot,
+               mt.id
       ORDER BY ${orderBy}
       LIMIT $2 OFFSET $3
     `;
