@@ -62,8 +62,21 @@ export interface PoolMember {
   first_seen_at: string;
   last_seen_at: string;
   worth_score: number | null;
+  /**
+   * P50 推荐 tip (最低推荐)。null = 成功样本不足。
+   * 见 0011 迁移：原来 0 是 "0 还是 NULL" 没法分辨，现在 nullable 区分语义。
+   */
   recommended_tip_sol: number | null;
+  /** P50 推荐 prio。null = 成功样本不足。 */
   recommended_prio_lamports: number | null;
+  /**
+   * P75 推荐 tip (激进推荐)。null = 成功样本不足。
+   * 0011 迁移新增的字段：以前和 recommended_tip_sol 共用一列，UI 拿不到 P50。
+   * 现在 P50 在 recommended_tip_sol，P75 在 recommended_tip_sol_p75，UI 可按场景选。
+   */
+  recommended_tip_sol_p75: number | null;
+  /** P75 推荐 prio。null = 成功样本不足。 */
+  recommended_prio_lamports_p75: number | null;
   score_updated_at: string | null;
   promoted_to_target: boolean;
   promoted_at: string | null;
@@ -657,6 +670,9 @@ export async function listPoolMembers(opts: {
            worth_score::text AS worth_score,
            recommended_tip_sol::text AS recommended_tip_sol,
            recommended_prio_lamports,
+           -- 0011 新增：P75 推荐（"激进推荐"），老 P50 在 recommended_tip_sol
+           recommended_tip_sol_p75::text AS recommended_tip_sol_p75,
+           recommended_prio_lamports_p75,
            score_updated_at, promoted_to_target, promoted_at, notes,
            is_akbot, akbot_detected_at, akbot_evidence_sig, akbot_evidence_slot
     FROM pool_members
@@ -687,6 +703,8 @@ export async function getPoolMember(address: string): Promise<PoolMember | null>
            worth_score::text AS worth_score,
            recommended_tip_sol::text AS recommended_tip_sol,
            recommended_prio_lamports,
+           recommended_tip_sol_p75::text AS recommended_tip_sol_p75,
+           recommended_prio_lamports_p75,
            score_updated_at, promoted_to_target, promoted_at, notes,
            is_akbot, akbot_detected_at, akbot_evidence_sig, akbot_evidence_slot
     FROM pool_members WHERE address = $1
@@ -858,7 +876,23 @@ function normalizeMember(r: any): PoolMember {
     ...r,
     avg_buy_sol: r.avg_buy_sol ? parseFloat(r.avg_buy_sol) : 0,
     worth_score: r.worth_score !== null ? parseFloat(r.worth_score) : null,
-    recommended_tip_sol: r.recommended_tip_sol !== null ? parseFloat(r.recommended_tip_sol) : null,
+    recommended_tip_sol:
+      r.recommended_tip_sol !== null && r.recommended_tip_sol !== undefined
+        ? parseFloat(r.recommended_tip_sol)
+        : null,
+    recommended_prio_lamports:
+      r.recommended_prio_lamports !== null && r.recommended_prio_lamports !== undefined
+        ? Number(r.recommended_prio_lamports)
+        : null,
+    // 0011 新增：P75 推荐字段 NULL → null；老逻辑把 undefined/null 都判空
+    recommended_tip_sol_p75:
+      r.recommended_tip_sol_p75 !== null && r.recommended_tip_sol_p75 !== undefined
+        ? parseFloat(r.recommended_tip_sol_p75)
+        : null,
+    recommended_prio_lamports_p75:
+      r.recommended_prio_lamports_p75 !== null && r.recommended_prio_lamports_p75 !== undefined
+        ? Number(r.recommended_prio_lamports_p75)
+        : null,
     is_akbot: !!r.is_akbot,
     akbot_evidence_slot: r.akbot_evidence_slot !== null ? Number(r.akbot_evidence_slot) : null,
   };

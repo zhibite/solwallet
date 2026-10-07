@@ -36,10 +36,11 @@ interface Target {
     worth_score: number | null;
     win_rate: number;
     avg_pnl_sol: number;
-    p50_tip_sol: number;
-    p50_prio_lamports: number;
-    p75_tip_sol: number;
-    p75_prio_lamports: number;
+    // 0011 修复：tip/prio 改为 nullable —— 样本不足时返 null，不再写 0 伪装
+    p50_tip_sol: number | null;
+    p50_prio_lamports: number | null;
+    p75_tip_sol: number | null;
+    p75_prio_lamports: number | null;
     success_count: number;
     failed_count: number;
     sample_size: number;

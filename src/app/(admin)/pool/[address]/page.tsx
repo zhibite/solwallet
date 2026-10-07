@@ -23,6 +23,9 @@ interface PoolMember {
   worth_score: number | null;
   recommended_tip_sol: number | null;
   recommended_prio_lamports: number | null;
+  // 0011 迁移新增：P75 推荐（"激进推荐"），老 P50 在 recommended_tip_sol
+  recommended_tip_sol_p75: number | null;
+  recommended_prio_lamports_p75: number | null;
   promoted_to_target: boolean;
   promoted_at: string | null;
   is_akbot: boolean;
@@ -74,13 +77,14 @@ interface TopCompetitor {
 }
 
 interface FeeRec {
-  p50_tip_sol: number;
-  p50_prio_lamports: number;
-  p75_tip_sol: number;
-  p75_prio_lamports: number;
+  // 0011 修复：tip/prio 改为 nullable —— 样本不足时返 null，不再写 0 伪装
+  p50_tip_sol: number | null;
+  p50_prio_lamports: number | null;
+  p75_tip_sol: number | null;
+  p75_prio_lamports: number | null;
   success_count: number;
-  failed_p50_tip_sol: number;
-  failed_p50_prio_lamports: number;
+  failed_p50_tip_sol: number | null;
+  failed_p50_prio_lamports: number | null;
   failed_count: number;
   sample_size: number;
   last_buy_at: string | null;

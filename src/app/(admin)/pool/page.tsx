@@ -22,6 +22,9 @@ interface PoolMember {
   worth_score: number | null;
   recommended_tip_sol: number | null;
   recommended_prio_lamports: number | null;
+  // 0011 迁移新增：P75 推荐（"激进推荐"），老 P50 在 recommended_tip_sol
+  recommended_tip_sol_p75: number | null;
+  recommended_prio_lamports_p75: number | null;
   promoted_to_target: boolean;
   promoted_at: string | null;
   is_akbot: boolean;
@@ -635,10 +638,17 @@ export default function PoolPage() {
                     <td className="px-3 py-2 text-right"><SolAmount value={m.avg_buy_sol} /></td>
                     <td className="px-3 py-2 text-right">{scoreBadge(m.worth_score)}</td>
                     <td className="px-3 py-2 text-right">
-                      {m.recommended_tip_sol ? <SolAmount value={m.recommended_tip_sol} /> : <span className="text-gray-400">-</span>}
+                      {/* 0011 修复：用 == null 显式判空，区分「推荐 0」（罕见但语义对）
+                          和「样本不足」（0 走 truthy 检查会显示 -，误导）。SolAmount
+                          组件对 0 渲染成 "0.0000"，对 null 渲染成 "-"，语义清晰。 */}
+                      {m.recommended_tip_sol == null
+                        ? <span className="text-gray-400">-</span>
+                        : <SolAmount value={m.recommended_tip_sol} />}
                     </td>
                     <td className="px-3 py-2 text-right">
-                      {m.recommended_prio_lamports ? <PrioSolAmount value={m.recommended_prio_lamports} /> : <span className="text-gray-400">-</span>}
+                      {m.recommended_prio_lamports == null
+                        ? <span className="text-gray-400">-</span>
+                        : <PrioSolAmount value={m.recommended_prio_lamports} />}
                     </td>
                     <td className="px-3 py-2 text-xs text-gray-500">
                       {new Date(m.last_seen_at).toLocaleString('zh-CN', { hour12: false }).slice(5)}
