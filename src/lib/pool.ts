@@ -323,101 +323,107 @@ export async function scanForTarget(opts: {
   }
 
   // 4) upsert 到 pool_members
+  //    用 ON CONFLICT DO UPDATE 一步搞定：消除 monitor + pool-worker 并发
+  //    SELECT 同一行都看到 NULL、然后两个都 INSERT 撞唯一键导致 23505。
+  //    RETURNING (xmax = 0) 是 Postgres 内置「这是新行还是被更新的行」的判别。
+  //    合并逻辑全部在 SQL 内做：
+  //      - freq / seen_as_*    : 直接相加
+  //      - target_addresses    : 数组去重并集
+  //      - mints_sample        : 数组去重并集（顺序由 array_agg 决定，UI 不依赖顺序）
+  //      - role                : 从合并后的两个计数派生
+  //      - avg_buy_sol         : 加权平均（avg * freq = sum）
+  //    注意 avg_offset_pos 在原 UPDATE 路径里就不更新，这里保持一致（不写）。
   let newMembers = 0;
   let updatedMembers = 0;
 
   for (const [addr, m] of memberAgg) {
-    // 合并 role
-    const cur = await queryOne<any>(`SELECT role, freq, seen_as_first_sniper, seen_as_follower,
-      target_addresses, mints_sample, avg_buy_sol, avg_offset_pos FROM pool_members WHERE address = $1`, [addr]);
-    if (!cur) {
-      await query(
-        `INSERT INTO pool_members (address, role, freq, seen_as_first_sniper, seen_as_follower,
+    const result = await query<{ inserted: boolean }>(
+      `INSERT INTO pool_members (address, role, freq, seen_as_first_sniper, seen_as_follower,
           distinct_targets, target_addresses, mints_sample, avg_buy_sol, avg_offset_pos, last_seen_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, NOW())`,
-        [
-          addr,
-          m.role,
-          m.freq,
-          m.seen_as_first_sniper,
-          m.seen_as_follower,
-          m.distinctTargets.size,
-          Array.from(m.distinctTargets),
-          Array.from(m.mints).slice(0, 100),
-          m.buySolSum / Math.max(m.freq, 1),
-          m.offsetPosCount ? m.offsetPosSum / m.offsetPosCount : 0,
-        ],
-      );
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, NOW())
+       ON CONFLICT (address) DO UPDATE
+       SET freq              = pool_members.freq + EXCLUDED.freq,
+           seen_as_first_sniper = pool_members.seen_as_first_sniper + EXCLUDED.seen_as_first_sniper,
+           seen_as_follower     = pool_members.seen_as_follower + EXCLUDED.seen_as_follower,
+           distinct_targets  = (
+             SELECT COUNT(DISTINCT v)::int FROM unnest(
+               pool_members.target_addresses || EXCLUDED.target_addresses
+             ) AS v
+           ),
+           target_addresses  = (
+             SELECT array_agg(DISTINCT v) FROM unnest(
+               pool_members.target_addresses || EXCLUDED.target_addresses
+             ) AS v
+           ),
+           mints_sample      = (
+             SELECT array_agg(DISTINCT v) FROM unnest(
+               pool_members.mints_sample || EXCLUDED.mints_sample
+             ) AS v
+           ),
+           role              = CASE
+             WHEN pool_members.seen_as_first_sniper + EXCLUDED.seen_as_first_sniper > 0
+              AND pool_members.seen_as_follower     + EXCLUDED.seen_as_follower     > 0
+             THEN 'both'
+             WHEN pool_members.seen_as_first_sniper + EXCLUDED.seen_as_first_sniper > 0
+             THEN 'first_sniper'
+             ELSE 'follower'
+           END,
+           avg_buy_sol       = CASE
+             WHEN pool_members.freq + EXCLUDED.freq > 0
+             THEN ((pool_members.avg_buy_sol * pool_members.freq)
+                   + (EXCLUDED.avg_buy_sol * EXCLUDED.freq))
+                  / (pool_members.freq + EXCLUDED.freq)
+             ELSE 0
+           END,
+           last_seen_at      = NOW()
+       RETURNING (xmax = 0) AS inserted`,
+      [
+        addr,
+        m.role,
+        m.freq,
+        m.seen_as_first_sniper,
+        m.seen_as_follower,
+        m.distinctTargets.size,
+        Array.from(m.distinctTargets),
+        Array.from(m.mints).slice(0, 100),
+        m.buySolSum / Math.max(m.freq, 1),
+        m.offsetPosCount ? m.offsetPosSum / m.offsetPosCount : 0,
+      ],
+    );
+    if (result[0]?.inserted) {
       newMembers++;
     } else {
-      const mergedTargets = Array.from(new Set([
-        ...(cur.target_addresses ?? []),
-        ...Array.from(m.distinctTargets),
-      ]));
-      const mergedMints = Array.from(new Set([
-        ...(cur.mints_sample ?? []),
-        ...Array.from(m.mints),
-      ])).slice(-100);
-
-      const newFreq = Number(cur.freq ?? 0) + m.freq;
-      const newFirstSniper = Number(cur.seen_as_first_sniper ?? 0) + m.seen_as_first_sniper;
-      const newFollower = Number(cur.seen_as_follower ?? 0) + m.seen_as_follower;
-      // role 从计数派生。不要写成「cur.role / m.role 里有没有 first_sniper」：
-      // m.role 只是本批第一条记录碰巧的角色，同一批里既当首狙又当跟随者的地址会被漏判成 follower。
-      const mergedRole: 'first_sniper' | 'follower' | 'both' =
-        newFirstSniper > 0 && newFollower > 0 ? 'both'
-          : newFirstSniper > 0 ? 'first_sniper' : 'follower';
-      const prevBuySolSum = (parseFloat(cur.avg_buy_sol ?? '0') * Number(cur.freq ?? 0)) + m.buySolSum;
-      const newAvgBuySol = prevBuySolSum / Math.max(newFreq, 1);
-
-      // distinct_targets: 用 cardinality array_length 不可靠，重新计算
-      const distinctCount = mergedTargets.length;
-
-      await query(
-        `UPDATE pool_members
-         SET role = $2, freq = $3, seen_as_first_sniper = $4, seen_as_follower = $5,
-             distinct_targets = $6, target_addresses = $7, mints_sample = $8,
-             avg_buy_sol = $9, last_seen_at = NOW()
-         WHERE address = $1`,
-        [addr, mergedRole, newFreq, newFirstSniper, newFollower, distinctCount,
-         mergedTargets, mergedMints, newAvgBuySol],
-      );
       updatedMembers++;
     }
   }
 
   // 5) upsert pool_edges
+  //    同 pool_members：原 SELECT-then-INSERT/UPDATE 会被 monitor + pool-worker
+  //    并发撞 UNIQUE(follower, target)。改为单条 UPSERT，靠 xmax=0 区分新增/更新。
   let newEdges = 0;
   let updatedEdges = 0;
 
   for (const [ek, e] of edgeAgg) {
     const [follower, target] = ek.split('|');
-    const cur = await queryOne<any>(`SELECT freq, same_slot_count, next_slot_count, win_count, fail_count
-      FROM pool_edges WHERE follower = $1 AND target = $2`, [follower, target]);
-    if (!cur) {
-      await query(
-        `INSERT INTO pool_edges (follower, target, freq, same_slot_count, next_slot_count,
+    const result = await query<{ inserted: boolean }>(
+      `INSERT INTO pool_edges (follower, target, freq, same_slot_count, next_slot_count,
           win_count, fail_count, avg_offset_pos, avg_buy_sol, last_seen_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, NOW())`,
-        [follower, target, e.freq, e.sameSlot, e.nextSlot, e.win, e.fail,
-         e.offsetPosCount ? e.offsetPosSum / e.offsetPosCount : 0,
-         e.buySolSum / Math.max(e.freq, 1)],
-      );
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, NOW())
+       ON CONFLICT (follower, target) DO UPDATE
+       SET freq            = pool_edges.freq + EXCLUDED.freq,
+           same_slot_count = pool_edges.same_slot_count + EXCLUDED.same_slot_count,
+           next_slot_count = pool_edges.next_slot_count + EXCLUDED.next_slot_count,
+           win_count       = pool_edges.win_count + EXCLUDED.win_count,
+           fail_count      = pool_edges.fail_count + EXCLUDED.fail_count,
+           last_seen_at    = NOW()
+       RETURNING (xmax = 0) AS inserted`,
+      [follower, target, e.freq, e.sameSlot, e.nextSlot, e.win, e.fail,
+       e.offsetPosCount ? e.offsetPosSum / e.offsetPosCount : 0,
+       e.buySolSum / Math.max(e.freq, 1)],
+    );
+    if (result[0]?.inserted) {
       newEdges++;
     } else {
-      const newFreq = Number(cur.freq ?? 0) + e.freq;
-      const newSameSlot = Number(cur.same_slot_count ?? 0) + e.sameSlot;
-      const newNextSlot = Number(cur.next_slot_count ?? 0) + e.nextSlot;
-      const newWin = Number(cur.win_count ?? 0) + e.win;
-      const newFail = Number(cur.fail_count ?? 0) + e.fail;
-
-      await query(
-        `UPDATE pool_edges
-         SET freq = $3, same_slot_count = $4, next_slot_count = $5,
-             win_count = $6, fail_count = $7, last_seen_at = NOW()
-         WHERE follower = $1 AND target = $2`,
-        [follower, target, newFreq, newSameSlot, newNextSlot, newWin, newFail],
-      );
       updatedEdges++;
     }
   }

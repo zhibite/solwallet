@@ -196,6 +196,36 @@ function tripCircuit(): void {
   console.warn(`[akbot] Helius 429，熔断 ${BREAK_AFTER_429_MS / 1000}s`);
 }
 
+/**
+ * 探测一个 thrown error 是不是 429 / 限流。
+ * multi-rpc 在所有够格端点都 429 后会抛 lastErr，err.message 通常带
+ * "429" / "Too Many Requests" / "rate limit" / "请求过多" 这几个词。
+ * 命中就让 tripCircuit() 把全局闸刀拉下来——否则下面 catch 只判 inconclusive
+ * 是不够的，429 后下一轮监控自然又会重打，熔断窗口等于没设。
+ */
+function isRateLimitError(err: unknown): boolean {
+  if (!err) return false;
+  const m =
+    (err as any)?.message ??
+    (typeof err === 'string' ? err : '') ??
+    '';
+  if (!m) return false;
+  return /429|too many requests|rate limit|rate limited|请求过多|超出请求频率|exceeded.*(rate|quota)/i.test(
+    String(m),
+  );
+}
+
+/**
+ * 公开 hook：让 multi-rpc.executeBatch 之类的底层 429 信号能直接拉下熔断。
+ * monitor / backfill 这类上层 try/catch 拿到限流错误时也应调它。
+ */
+export function reportAkbotRateLimit(reason?: string): void {
+  if (!isCircuitOpen()) {
+    console.warn(`[akbot] 外部报告 429，触发熔断 (${reason ?? 'no reason'})`);
+  }
+  tripCircuit();
+}
+
 async function acquireScanSlot(): Promise<void> {
   if (inFlight < MAX_CONCURRENT_SCANS) {
     inFlight++;
@@ -230,6 +260,14 @@ async function scanAddressForAkbotCore(
   await acquireScanSlot();
   try {
     return await doScanAddressForAkbot(address, opts);
+  } catch (err) {
+    // 之前这里 catch 完直接抛出去，tripCircuit 永远没机会跑（Fix #1）。
+    // 现在：检测到限流类错误就拉下熔断，再把错误抛给上层；非限流类错误
+    // 保持原样不污染熔断窗口。
+    if (isRateLimitError(err)) {
+      tripCircuit();
+    }
+    throw err;
   } finally {
     releaseScanSlot();
   }

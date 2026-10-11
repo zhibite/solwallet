@@ -260,7 +260,7 @@ export async function recommendFeeForTarget(targetAddress: string): Promise<FeeR
            AND bb.address IS NOT NULL
            AND bb.address <> t.target_address
            AND bb.is_own = FALSE
-         ORDER BY bb.block_time DESC
+         ORDER BY ba.block_time DESC, bb.id DESC
          LIMIT $2
       ) bb
      WHERE t.target_address = $1

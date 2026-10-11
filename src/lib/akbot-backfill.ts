@@ -63,6 +63,7 @@ export interface AkbotScanResult {
 
 /** 进程内互斥：避免 UI+定时撞车 */
 let inFlight: Promise<AkbotScanResult> | null = null;
+let currentAbortController: AbortController | null = null;
 
 /**
  * 跑一次 akbot 池子回填。
@@ -87,8 +88,24 @@ export function runAkbotScan(opts: AkbotScanOpts = {}): Promise<AkbotScanResult>
     });
   }
 
-  const p = runScan(opts).finally(() => {
+  // Fix #12：以前 cancelAkbotScan 是不作为（注释自己承认了）—— 现在每次跑都建
+  // 一个 AbortController，把 opts.signal 与我们的 controller 合并：
+  //   - 调用方传 signal → 走 signal 路径
+  //   - 调用方没传 signal（CLI、worker 调度）→ 走我们的 controller，cancelAkbotScan 能真取消
+  const ctrl = new AbortController();
+  currentAbortController = ctrl;
+  if (opts.signal) {
+    if (opts.signal.aborted) {
+      ctrl.abort();
+    } else {
+      opts.signal.addEventListener('abort', () => ctrl.abort(), { once: true });
+    }
+  }
+  const mergedOpts: AkbotScanOpts = { ...opts, signal: ctrl.signal };
+
+  const p = runScan(mergedOpts).finally(() => {
     inFlight = null;
+    currentAbortController = null;
   });
   inFlight = p;
   return p;
@@ -217,12 +234,18 @@ export function isAkbotScanRunning(): boolean {
   return inFlight !== null;
 }
 
-/** 取消当前正在跑的扫描（无扫描时返回 false） */
+/** 取消当前正在跑的扫描（无扫描时返回 false）
+ *
+ * Fix #12：之前是「false-work」—— 返回值糊弄 UI，实际扫描继续跑。
+ * 现在通过 currentAbortController 真打断 runScan 的 for 循环（它每个地址前
+ * 都会检查 signal.aborted）。下一次 scanAddressForAkbot 调用前会先看 circuit，
+ * 已经开跑的那笔也会快速收尾。
+ */
 export function cancelAkbotScan(): boolean {
-  // AbortSignal 由 inFlight 自己持有；外面拿不到，这里只能靠标记 inFlight=null 让它下一轮跳出。
-  // 因为 inFlight 会在 finally 里清掉，所以「点了取消但等它自己跑完」是当前最稳的策略。
-  // 这里返回 inFlight !== null 用来给 UI 一个「取消请求已提交」的回执。
-  return inFlight !== null;
+  if (!currentAbortController) return false;
+  currentAbortController.abort();
+  console.log('[akbot-backfill] cancel requested, abort signal sent');
+  return true;
 }
 
 export { AKBOT_PROGRAM };
