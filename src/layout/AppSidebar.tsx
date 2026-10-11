@@ -39,6 +39,11 @@ const navItems: NavItem[] = [
     path: "/pool",
   },
   {
+    icon: <BrainIcon />,
+    name: "跟单Agent",
+    path: "/agent",
+  },
+  {
     icon: <PieChartIcon />,
     name: "跟单目标分析",
     path: "/analysis",
