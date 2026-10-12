@@ -57,16 +57,27 @@ function parseBasicAuth(header: string | null): { user: string; pass: string } |
 }
 
 /**
+ * 临时禁用（用户反馈先把鉴权去掉）
+ *
+ * 恢复鉴权：把 `DISABLED_FOR_NOW` 改回 `false` 即可，
+ *          配套 .env 里 AGENT_BASIC_USER + AGENT_BASIC_PASS 仍保留
+ */
+const DISABLED_FOR_NOW = true;
+
+/**
  * 给 /api/agent/* 各 route handler 在开头调一次。
  *
- * 行为：
- *   - env 缺凭据 → 返 503（明确告诉运维「你还没配」），不是 401
- *   - 凭据不对 → 401 + WWW-Authenticate 头
- *   - 凭据对 → 放行
+ * 行为（禁用中：直接放行，不再做 Basic Auth 校验）：
+ *   - 鉴权关闭期间：所有 /api/agent/* 请求均通过，行为与无鉴权时一致
+ *   - 重新启用：把上方 DISABLED_FOR_NOW 改回 false
  */
 export function checkAgentAuth(
   request: Request,
 ): { ok: true } | NextResponse {
+  if (DISABLED_FOR_NOW) {
+    return { ok: true };
+  }
+
   // 同进程一次通过就缓存（agent 页面会高频轮询，节省一些比较）
   if (authVerifiedThisProcess) return { ok: true };
 
