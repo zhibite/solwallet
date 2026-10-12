@@ -10,13 +10,15 @@ export default function PrioSolAmount({
   value,
   decimals = 6,
   signed = false,
+  className,
 }: {
   value: number | string | null | undefined;
   decimals?: number;
   signed?: boolean;
+  className?: string;
 }) {
   if (value === null || value === undefined || value === "") return <SolAmount value={null} />;
   const n = typeof value === "string" ? parseFloat(value) : value;
   if (!Number.isFinite(n)) return <SolAmount value={null} />;
-  return <SolAmount value={n / 1e9} decimals={decimals} signed={signed} />;
+  return <SolAmount value={n / 1e9} decimals={decimals} signed={signed} className={className} />;
 }

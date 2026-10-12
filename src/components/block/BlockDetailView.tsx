@@ -3,7 +3,6 @@ import React, { useEffect, useState } from "react";
 import AddressCopy from "@/components/common/AddressCopy";
 import SolAmount from "@/components/common/SolAmount";
 import PrioSolAmount from "@/components/common/PrioSolAmount";
-import TipSourceBadge from "@/components/common/TipSourceBadge";
 import RelativeTime from "@/components/common/RelativeTime";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 
@@ -282,8 +281,7 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
                 <th className="px-3 py-2 text-left">地址</th>
                 <th className="px-3 py-2 text-right">买入 SOL</th>
                 <th className="px-3 py-2 text-right">TIP</th>
-                <th className="px-3 py-2 text-center">渠道</th>
-                <th className="px-3 py-2 text-right">优先级费 (SOL)</th>
+                <th className="px-3 py-2 text-right">优先费</th>
                 <th className="px-3 py-2 text-right">跟单收益</th>
                 <th className="px-3 py-2 text-center">结果</th>
                 <th className="px-3 py-2 text-center">版本</th>
@@ -308,12 +306,14 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
                   <tr
                     key={b.id}
                     className={`border-b border-gray-100 dark:border-gray-700/50 ${
+                      // 截图风格：目标 = 浅品牌色、首狙 = 浅红、我的账号 = 浅绿
+                      // 标记 pill 已在"标记"列里，行底色作为辅助视觉
                       isTarget
                         ? 'bg-brand-50 dark:bg-brand-500/10'
                         : b.is_first_sniper
-                          ? 'bg-success-50 dark:bg-success-500/10'
+                          ? 'bg-red-50 dark:bg-red-500/10'
                           : b.is_own
-                            ? 'bg-warning-50 dark:bg-warning-500/10'
+                            ? 'bg-success-50 dark:bg-success-500/10'
                             : ''
                     }`}
                   >
@@ -331,10 +331,10 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
                             : b.offset_pos}
                     </td>
                     <td className="px-3 py-2">
-                      {isTarget ? <Badge color="brand">目标</Badge> :
-                       b.is_first_sniper ? <Badge color="success">首狙</Badge> :
-                       b.is_own ? <Badge color="warning">我的账号</Badge> :
-                       b.is_pre_target ? <Badge color="gray">前置</Badge> :
+                      {/* 标记：截图风格 —— 第一个狙击者(红)、我的账号(绿)、跟随(蓝)
+                          目标 / 前置 不打 pill，靠行底色区分（见上面 tr 的 className） */}
+                      {b.is_first_sniper ? <Badge color="red">第一个狙击者</Badge> :
+                       b.is_own ? <Badge color="success">我的账号</Badge> :
                        <Badge color="info">跟随</Badge>}
                       {b.is_bundled && (
                         <span
@@ -365,9 +365,6 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
                     <td className="px-3 py-2 text-right">
                       <SolAmount value={b.tip_sol} />
                     </td>
-                    <td className="px-3 py-2 text-center">
-                      <TipSourceBadge value={b.tip_source} />
-                    </td>
                     <td className="px-3 py-2 text-right">
                       <PrioSolAmount value={b.prio_lamports} />
                     </td>
@@ -397,12 +394,16 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
                       )}
                     </td>
                     <td className="px-3 py-2 text-center">
+                      {/* 截图风格：成功/失败 用中文 pill 替代圆点+英文 */}
                       {b.result === 'success' ? (
-                        <span className="inline-block w-2 h-2 rounded-full bg-success-500"></span>
+                        <span className="inline-block px-1.5 py-0.5 rounded text-xs bg-success-500/20 text-success-700 dark:text-success-400">
+                          成功
+                        </span>
                       ) : (
-                        <span className="inline-block w-2 h-2 rounded-full bg-error-500"></span>
+                        <span className="inline-block px-1.5 py-0.5 rounded text-xs bg-red-500/20 text-red-700 dark:text-red-400">
+                          失败
+                        </span>
                       )}
-                      <span className="ml-1 text-xs text-gray-500 dark:text-gray-400">{b.result}</span>
                     </td>
                     <td className="px-3 py-2 text-center text-xs text-gray-500 dark:text-gray-400">{b.version}</td>
                     <td className="px-3 py-2 text-center">
@@ -490,13 +491,16 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
   );
 }
 
-function Badge({ color, children }: { color: 'brand' | 'success' | 'warning' | 'info' | 'gray'; children: React.ReactNode }) {
+function Badge({ color, children }: { color: 'red' | 'success' | 'warning' | 'info'; children: React.ReactNode }) {
   const colors = {
-    brand: 'bg-brand-500/20 text-brand-600 dark:text-brand-400',
+    // 红：第一个狙击者（醒目，跟"成功/跟单"色系拉开）
+    red: 'bg-red-500/20 text-red-700 dark:text-red-400 border border-red-500/30',
+    // 绿：我的账号（用户视角的"我"，用中性成功色）
     success: 'bg-success-500/20 text-success-700 dark:text-success-400',
+    // 黄：保留 —— 万一以后要复用
     warning: 'bg-warning-500/20 text-warning-700 dark:text-warning-400',
+    // 蓝：跟随者
     info: 'bg-blue-500/20 text-blue-700 dark:text-blue-400',
-    gray: 'bg-gray-200 dark:bg-zinc-700 text-gray-600 dark:text-gray-300',
   };
   return (
     <span className={`inline-block px-1.5 py-0.5 rounded text-xs ${colors[color]}`}>
