@@ -87,7 +87,7 @@ export function extractMint(tx: HeliusEnhancedTx): string | null {
  * 两者可能不是同一条（数组顺序不保证按金额排），导致落库的 token 数量
  * 跟 mint 对不上，FIFO 配对就会算错。
  */
-function findInboundTransfer(tx: HeliusEnhancedTx) {
+export function findInboundTransfer(tx: HeliusEnhancedTx) {
   if (!tx.tokenTransfers || tx.tokenTransfers.length === 0) return null;
   return (
     tx.tokenTransfers.find((t) => t.toUserAccount === tx.feePayer) ??
