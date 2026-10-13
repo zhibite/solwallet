@@ -5,6 +5,7 @@ import AddressCopy from "@/components/common/AddressCopy";
 import SolAmount from "@/components/common/SolAmount";
 import PrioSolAmount from "@/components/common/PrioSolAmount";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { ExternalLinkIcon } from "@/icons";
 
 interface PoolMember {
   id: number;
@@ -27,6 +28,12 @@ interface PoolMember {
   recommended_prio_lamports_p75: number | null;
   promoted_to_target: boolean;
   promoted_at: string | null;
+  // 该地址在 monitored_targets 里的真实状态（LEFT JOIN 拿到的实时值）。
+  // 'active' = 在监控中，'paused' = 在监控但暂停，null = 不在监控列表。
+  // 前端「✓ 已监控」/「监控」按钮 / 「已是监控目标」提示都看这个字段，不能看
+  // promoted_to_target（那个只反映是否被 pool 系统晋升过，会和 monitor 页面手动
+  // 添加 / 暂停 / 删除漂移）。详见 src/lib/pool.ts PoolMember.monitor_status 注释。
+  monitor_status: 'active' | 'paused' | null;
   is_akbot: boolean;
   akbot_detected_at: string | null;
   akbot_evidence_sig: string | null;
@@ -269,19 +276,23 @@ export default function PoolPage() {
   useEffect(() => () => stopAkbotPolling(), []);
 
   const promote = async (m: PoolMember) => {
-    // 视图层虽然只在 !m.promoted_to_target 时显示按钮，但并发场景下（另一个 tab /
+    // 视图层虽然 monitor_status=null 时才显示按钮，但并发场景下（另一个 tab /
     // 操作员刚刚加过）仍可能出现后端返回 'already a monitored target'。
     // 这里也提前做一次 best-effort 检查，直接给提示，避免用户走完确认流程才知道。
-    if (m.promoted_to_target) {
+    // 注：以前用 m.promoted_to_target 判，但 promoted_to_target 只在「被 pool 系统
+    // 晋升过」时 = true；手动从 monitor 页面加的地址这里就是 false —— 现在改成
+    // m.monitor_status 反映 monitored_targets 真实状态。
+    if (m.monitor_status === 'active' || m.monitor_status === 'paused') {
       const at = m.promoted_at
         ? `（${new Date(m.promoted_at).toLocaleString('zh-CN', { hour12: false })}）`
         : '';
+      const stateLabel = m.monitor_status === 'paused' ? '（已暂停）' : '';
       await alert({
         title: '已是监控目标',
         description: (
           <>
             <span className="font-mono">{m.address.slice(0, 6)}…{m.address.slice(-4)}</span>{' '}
-            已经在监控列表中{at}，无需重复添加。
+            已经在监控列表中{stateLabel}{at}，无需重复添加。
           </>
         ),
         variant: 'info',
@@ -414,6 +425,26 @@ export default function PoolPage() {
     if (s === null) return <span className="text-xs text-gray-400">-</span>;
     const color = s > 1 ? 'text-success-500' : s < -0.5 ? 'text-error-500' : 'text-warning-500';
     return <span className={`text-xs font-mono ${color}`}>{s.toFixed(2)}</span>;
+  };
+
+  // promoted_to_target 已漂移（见 pool.ts / PoolMember.monitor_status 注释）；
+  // 实际「是否在监控」看 m.monitor_status，paused 状态视觉上区分一下让用户知道
+  // 这个地址虽然在监控里但是停的，避免误以为仍在跑。
+  const monitorBadge = (m: PoolMember) => {
+    if (m.monitor_status === 'active') {
+      return <span className="text-xs text-success-500 whitespace-nowrap">✓ 已监控</span>;
+    }
+    if (m.monitor_status === 'paused') {
+      return (
+        <span
+          className="text-xs text-gray-400 dark:text-gray-500 whitespace-nowrap"
+          title="该地址在监控列表中，但当前已暂停"
+        >
+          ⏸ 已暂停
+        </span>
+      );
+    }
+    return null;
   };
 
   return (
@@ -611,6 +642,19 @@ export default function PoolPage() {
                         <Link href={`/pool/${m.address}`} className="hover:text-brand-500">
                           <AddressCopy address={m.address} />
                         </Link>
+                        {/* GMGN 钱包详情外链 —— 放在 AddressCopy 后面（与复制图标相邻）。
+                            不嵌进 <Link>，避免点 GMGN 时被外层 Link 拦截成跳转 /pool/[address]。
+                            target="_blank" + rel="noopener noreferrer" 是外链标准做法。 */}
+                        <a
+                          href={`https://gmgn.ai/sol/address/${m.address}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center justify-center w-5 h-5 rounded text-gray-400 hover:text-brand-500 hover:bg-gray-100 dark:hover:bg-zinc-700 transition-colors"
+                          title={`在 GMGN 查看 ${m.address.slice(0, 6)}…${m.address.slice(-4)}`}
+                          aria-label="在 GMGN 查看"
+                        >
+                          <ExternalLinkIcon className="w-3 h-3" />
+                        </a>
                         {m.is_akbot && (
                           <span
                             className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-orange-50 text-orange-700 dark:bg-orange-500/15 dark:text-orange-400 border border-orange-200/70 dark:border-orange-500/30"
@@ -655,9 +699,7 @@ export default function PoolPage() {
                     </td>
                     <td className="px-3 py-2 text-center">
                       <div className="inline-flex flex-row items-center gap-2">
-                        {m.promoted_to_target ? (
-                          <span className="text-xs text-success-500 whitespace-nowrap">✓ 已监控</span>
-                        ) : (
+                        {monitorBadge(m) ?? (
                           <button
                             onClick={() => promote(m)}
                             className="text-xs text-brand-500 hover:underline whitespace-nowrap"

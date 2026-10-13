@@ -78,8 +78,24 @@ export interface PoolMember {
   /** P75 推荐 prio。null = 成功样本不足。 */
   recommended_prio_lamports_p75: number | null;
   score_updated_at: string | null;
+  /**
+   * 「该地址是否被 pool 系统晋升过」—— 池子内部状态。
+   * 注意：不要用这个判断「是否已加入监控列表」。monitored_targets 才是监控的真相源；
+   * 这个字段只能反映"是否被 pool 流程 promote 过"，跟 monitor 页面手动添加 / 暂停 / 删除
+   * 不同步，是历史遗留的冗余字段。判断 UI 上的「✓ 已监控」请用 monitor_status。
+   */
   promoted_to_target: boolean;
   promoted_at: string | null;
+  /**
+   * 该地址在 monitored_targets 里的真实状态（LEFT JOIN 拿到的实时值）。
+   *   - 'active'  : 在监控中
+   *   - 'paused'  : 在监控但被暂停
+   *   - null      : 不在监控列表
+   * 前端「✓ 已监控」/「监控」按钮应该看这个字段，不能看 promoted_to_target。
+   * 修这个之前用户从 monitor 页面加的地址，在 pool 页面搜出来还显示「监控」按钮，
+   * 点了后端才告诉"already a monitored target"，是个常见的误导。
+   */
+  monitor_status: 'active' | 'paused' | null;
   notes: string | null;
   // AKBot 用户标记（见 migrations/0006_akbot_tag.sql）
   is_akbot: boolean;
@@ -659,29 +675,35 @@ export async function listPoolMembers(opts: {
   }
   if (opts.address && opts.address.trim() !== '') {
     params.push(`%${escapeLike(opts.address.trim())}%`);
-    conditions.push(`address ILIKE $${params.length} ESCAPE '\\'`);
+    // LEFT JOIN monitored_targets 之后 address 列名歧义，必须 pm. 前缀
+    conditions.push(`pm.address ILIKE $${params.length} ESCAPE '\\'`);
   }
   const orderCol =
-    opts.sortBy === 'score' ? 'worth_score DESC NULLS LAST' :
-    opts.sortBy === 'seen' ? 'last_seen_at DESC' :
-    'freq DESC';
+    opts.sortBy === 'score' ? 'pm.worth_score DESC NULLS LAST' :
+    opts.sortBy === 'seen' ? 'pm.last_seen_at DESC' :
+    'pm.freq DESC';
 
   params.push(opts.limit ?? 100);
   params.push(opts.offset ?? 0);
 
+  // LEFT JOIN monitored_targets 拿真实状态 —— 见 PoolMember.monitor_status 注释。
+  // 之前只用 pool_members.promoted_to_target，会和 monitor 页面手动添加 / 暂停 / 删除
+  // 漂移，导致「已在监控」的地址在 pool 页面搜出来还显示「监控」按钮。
   const rows = await query<any>(`
-    SELECT id, address, label, role, freq, seen_as_first_sniper, seen_as_follower,
-           distinct_targets, target_addresses, mints_sample, avg_buy_sol::text AS avg_buy_sol,
-           avg_offset_pos, first_seen_at, last_seen_at,
-           worth_score::text AS worth_score,
-           recommended_tip_sol::text AS recommended_tip_sol,
-           recommended_prio_lamports,
+    SELECT pm.id, pm.address, pm.label, pm.role, pm.freq, pm.seen_as_first_sniper, pm.seen_as_follower,
+           pm.distinct_targets, pm.target_addresses, pm.mints_sample, pm.avg_buy_sol::text AS avg_buy_sol,
+           pm.avg_offset_pos, pm.first_seen_at, pm.last_seen_at,
+           pm.worth_score::text AS worth_score,
+           pm.recommended_tip_sol::text AS recommended_tip_sol,
+           pm.recommended_prio_lamports,
            -- 0011 新增：P75 推荐（"激进推荐"），老 P50 在 recommended_tip_sol
-           recommended_tip_sol_p75::text AS recommended_tip_sol_p75,
-           recommended_prio_lamports_p75,
-           score_updated_at, promoted_to_target, promoted_at, notes,
-           is_akbot, akbot_detected_at, akbot_evidence_sig, akbot_evidence_slot
-    FROM pool_members
+           pm.recommended_tip_sol_p75::text AS recommended_tip_sol_p75,
+           pm.recommended_prio_lamports_p75,
+           pm.score_updated_at, pm.promoted_to_target, pm.promoted_at, pm.notes,
+           pm.is_akbot, pm.akbot_detected_at, pm.akbot_evidence_sig, pm.akbot_evidence_slot,
+           mt.status AS monitor_status
+    FROM pool_members pm
+    LEFT JOIN monitored_targets mt ON mt.address = pm.address
     WHERE ${conditions.join(' AND ')}
     ORDER BY ${orderCol}
     LIMIT $${params.length - 1} OFFSET $${params.length}
@@ -702,18 +724,22 @@ function escapeLike(s: string): string {
  * 给定地址返回 pool 详情
  */
 export async function getPoolMember(address: string): Promise<PoolMember | null> {
+  // LEFT JOIN monitored_targets —— 同 listPoolMembers 注释，monitor_status 是真实状态。
   const row = await queryOne<any>(`
-    SELECT id, address, label, role, freq, seen_as_first_sniper, seen_as_follower,
-           distinct_targets, target_addresses, mints_sample, avg_buy_sol::text AS avg_buy_sol,
-           avg_offset_pos, first_seen_at, last_seen_at,
-           worth_score::text AS worth_score,
-           recommended_tip_sol::text AS recommended_tip_sol,
-           recommended_prio_lamports,
-           recommended_tip_sol_p75::text AS recommended_tip_sol_p75,
-           recommended_prio_lamports_p75,
-           score_updated_at, promoted_to_target, promoted_at, notes,
-           is_akbot, akbot_detected_at, akbot_evidence_sig, akbot_evidence_slot
-    FROM pool_members WHERE address = $1
+    SELECT pm.id, pm.address, pm.label, pm.role, pm.freq, pm.seen_as_first_sniper, pm.seen_as_follower,
+           pm.distinct_targets, pm.target_addresses, pm.mints_sample, pm.avg_buy_sol::text AS avg_buy_sol,
+           pm.avg_offset_pos, pm.first_seen_at, pm.last_seen_at,
+           pm.worth_score::text AS worth_score,
+           pm.recommended_tip_sol::text AS recommended_tip_sol,
+           pm.recommended_prio_lamports,
+           pm.recommended_tip_sol_p75::text AS recommended_tip_sol_p75,
+           pm.recommended_prio_lamports_p75,
+           pm.score_updated_at, pm.promoted_to_target, pm.promoted_at, pm.notes,
+           pm.is_akbot, pm.akbot_detected_at, pm.akbot_evidence_sig, pm.akbot_evidence_slot,
+           mt.status AS monitor_status
+    FROM pool_members pm
+    LEFT JOIN monitored_targets mt ON mt.address = pm.address
+    WHERE pm.address = $1
   `, [address]);
   return row ? normalizeMember(row) : null;
 }
@@ -857,9 +883,17 @@ export async function getPoolStats(): Promise<{
   akbotCount: number;
   bfsLastRun: string | null;
 }> {
+  // promoted 之前是 `pool_members.promoted_to_target = true`，会漏掉「从 monitor
+  // 页面手动加的、但 pool_members 这边 promoted_to_target 仍为 false」的地址。
+  // 改用 EXISTS 查 monitored_targets 真实状态，统计「池成员里实际在监控列表中」的数量。
+  // 详见 PoolMember.monitor_status 注释。
   const [total, prom, fs, fo, ed, akb, lastRun] = await Promise.all([
     queryOne<{ c: string }>(`SELECT COUNT(*)::text AS c FROM pool_members`),
-    queryOne<{ c: string }>(`SELECT COUNT(*)::text AS c FROM pool_members WHERE promoted_to_target = true`),
+    queryOne<{ c: string }>(`
+      SELECT COUNT(*)::text AS c
+        FROM pool_members pm
+       WHERE EXISTS (SELECT 1 FROM monitored_targets mt WHERE mt.address = pm.address)
+    `),
     queryOne<{ c: string }>(`SELECT COUNT(*)::text AS c FROM pool_members WHERE role IN ('first_sniper', 'both')`),
     queryOne<{ c: string }>(`SELECT COUNT(*)::text AS c FROM pool_members WHERE role IN ('follower', 'both')`),
     queryOne<{ c: string }>(`SELECT COUNT(*)::text AS c FROM pool_edges`),
@@ -901,5 +935,9 @@ function normalizeMember(r: any): PoolMember {
         : null,
     is_akbot: !!r.is_akbot,
     akbot_evidence_slot: r.akbot_evidence_slot !== null ? Number(r.akbot_evidence_slot) : null,
+    // monitored_targets LEFT JOIN 的 status：
+    //   - pg 返回 native 是 'active' | 'paused'，前端要"已监控"显示用 truthy 判断
+    //   - LEFT JOIN 没匹配上时是 NULL，这里转成 null 让前端 `m.monitor_status ? ...` 走 false 分支
+    monitor_status: r.monitor_status ?? null,
   };
 }

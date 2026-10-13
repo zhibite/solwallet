@@ -63,6 +63,11 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [recalculating, setRecalculating] = useState(false);
+  const [bulkPnl, setBulkPnl] = useState<{
+    running: boolean;
+    /** 上次跑完的结果摘要（错误也记） */
+    lastSummary: { computed: number; skipped: number; errors: number } | null;
+  }>({ running: false, lastSummary: null });
   const { confirm, alert } = useConfirm();
 
   const load = async () => {
@@ -101,6 +106,65 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
       await load();
     } finally {
       setRecalculating(false);
+    }
+  };
+
+  /**
+   * 批量算所有 buyer 的跟单收益（受 BULK_PNL_CONCURRENCY=4 控制）
+   *
+   * 行为：
+   *   - 默认跳过已经算过的（pnl_status 非空）
+   *   - force=true 时重算所有人
+   *   - 失败 tx (result='failed') 永远跳过
+   *
+   * 不在 UI 上显示「n/total」进度 —— 这个接口是 HTTP 单次返回，
+   * 没法流式推回进度。给用户一个转圈 + 「算收益中…」即可，结果出来后
+   * 直接合并进本地 state（避免再 load() 闪一下）。
+   */
+  const runBulkPnl = async (force = false) => {
+    setBulkPnl((s) => ({ ...s, running: true }));
+    try {
+      const res = await fetch(`/api/block/${slot}/${mint}/pnl`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force }),
+      });
+      const json = await res.json();
+      if (!json.ok) {
+        await alert({ title: '批量算收益失败', description: json.error, variant: 'danger' });
+        setBulkPnl((s) => ({ ...s, running: false }));
+        return;
+      }
+      // 把后端返回的结果合并进本地 buyers list —— 避免再 load() 闪一下
+      const results: Array<{ buyerId: number; pnlSol: number | null; status: string; soldRatio: number | null }> = json.results ?? [];
+      const byId = new Map(results.map((r) => [r.buyerId, r]));
+      const errors = results.filter((r) => r.status === 'error').length;
+      setBuyers((prev) =>
+        prev.map((b) => {
+          const r = byId.get(b.id);
+          if (!r) return b;
+          return {
+            ...b,
+            pnl_sol: r.pnlSol !== null ? String(r.pnlSol) : null,
+            pnl_status: r.status === 'error' ? null : r.status,
+            pnl_sold_ratio: r.soldRatio != null ? String(r.soldRatio) : null,
+          };
+        }),
+      );
+      setBulkPnl({
+        running: false,
+        lastSummary: { computed: json.computed, skipped: json.skipped, errors },
+      });
+      if (errors > 0) {
+        await alert({
+          title: '批量算收益完成（有错误）',
+          description: `算 ${json.computed} · 跳 ${json.skipped} · 失败 ${errors}（查看浏览器 console）`,
+          variant: 'warning',
+        });
+      }
+    } catch (err: any) {
+      await alert({ title: '批量算收益失败', description: err?.message ?? String(err), variant: 'danger' });
+      setBulkPnl((s) => ({ ...s, running: false }));
     }
   };
 
@@ -259,17 +323,53 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
 
       {/* Block 内每笔交易 */}
       <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
-        <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+        <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between gap-3 flex-wrap">
           <h2 className="text-sm font-semibold text-gray-800 dark:text-white/90">
             Slot 内所有交易（{totalCount} 笔）
           </h2>
-          <button
-            onClick={recalc}
-            disabled={recalculating}
-            className="text-xs px-3 py-1 rounded-lg bg-slate-100 dark:bg-zinc-700 hover:bg-slate-200 dark:hover:bg-zinc-600 text-gray-600 dark:text-gray-300 disabled:opacity-50"
-          >
-            {recalculating ? '算收益中...' : '算收益'}
-          </button>
+          <div className="flex items-center gap-2 flex-wrap">
+            {bulkPnl.running && (
+              <span className="text-xs text-brand-600 dark:text-brand-400 inline-flex items-center gap-1.5">
+                <span className="inline-block w-3 h-3 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
+                批量算收益中（10-40s，受 Helius 速度影响）…
+              </span>
+            )}
+            {!bulkPnl.running && bulkPnl.lastSummary && (
+              <span
+                className="text-xs text-gray-500 dark:text-gray-400"
+                title={`重算 ${bulkPnl.lastSummary.computed} 笔 · 跳过 ${bulkPnl.lastSummary.skipped} 笔 · 失败 ${bulkPnl.lastSummary.errors} 笔`}
+              >
+                上次: 算 {bulkPnl.lastSummary.computed} · 跳 {bulkPnl.lastSummary.skipped}
+                {bulkPnl.lastSummary.errors > 0 && (
+                  <span className="text-error-500 ml-1">· 失败 {bulkPnl.lastSummary.errors}</span>
+                )}
+              </span>
+            )}
+            <button
+              onClick={() => runBulkPnl(false)}
+              disabled={bulkPnl.running || recalculating}
+              className="text-xs px-3 py-1 rounded-lg bg-brand-500/10 text-brand-700 dark:text-brand-400 hover:bg-brand-500/20 disabled:opacity-50"
+              title="并行算所有 buyer 的 PnL，跳过已算过/失败的"
+            >
+              批量算收益
+            </button>
+            <button
+              onClick={() => runBulkPnl(true)}
+              disabled={bulkPnl.running || recalculating}
+              className="text-xs px-3 py-1 rounded-lg bg-slate-100 dark:bg-zinc-700 hover:bg-slate-200 dark:hover:bg-zinc-600 text-gray-600 dark:text-gray-300 disabled:opacity-50"
+              title="强制重算所有 buyer（包含已算过的）"
+            >
+              重算全部
+            </button>
+            <button
+              onClick={recalc}
+              disabled={recalculating || bulkPnl.running}
+              className="text-xs px-3 py-1 rounded-lg bg-slate-100 dark:bg-zinc-700 hover:bg-slate-200 dark:hover:bg-zinc-600 text-gray-600 dark:text-gray-300 disabled:opacity-50"
+              title="重跑 block 分析（重识别首狙/跟随/自己账号）"
+            >
+              {recalculating ? '分析中…' : '重分析'}
+            </button>
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">

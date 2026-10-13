@@ -28,6 +28,10 @@ interface PoolMember {
   recommended_prio_lamports_p75: number | null;
   promoted_to_target: boolean;
   promoted_at: string | null;
+  // 该地址在 monitored_targets 里的真实状态（LEFT JOIN 拿到的实时值）。
+  // 详见 src/lib/pool.ts PoolMember.monitor_status 注释 —— 不要再用 promoted_to_target
+  // 判断「是否在监控」，会和 monitor 页面手动添加 / 暂停 / 删除漂移。
+  monitor_status: 'active' | 'paused' | null;
   is_akbot: boolean;
   akbot_detected_at: string | null;
   akbot_evidence_sig: string | null;
@@ -279,8 +283,11 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
             }`}>
               {member.role}
             </span>
-            {member.promoted_to_target && (
+            {member.monitor_status === 'active' && (
               <span className="text-xs text-success-500">已加入监控</span>
+            )}
+            {member.monitor_status === 'paused' && (
+              <span className="text-xs text-gray-400" title="该地址在监控列表中，但当前已暂停">已暂停</span>
             )}
             {member.is_akbot && (
               <span
@@ -296,7 +303,9 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {!member.promoted_to_target ? (
+          {/* 不在监控才显示「加入监控 + 阈值输入」；active / paused 都视作"已在监控"，
+              避免对 paused 重复调 promote 接口被后端以 'already a monitored target' 拒掉。 */}
+          {!member.monitor_status ? (
             <div className="flex items-center gap-2">
               <div className="flex items-center h-9 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-zinc-800 overflow-hidden focus-within:ring-2 focus-within:ring-brand-500/40">
                 <input
@@ -318,6 +327,13 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
                 加入监控
               </button>
             </div>
+          ) : member.monitor_status === 'paused' ? (
+            <span
+              className="inline-flex items-center h-9 px-3 rounded-xl bg-gray-100 dark:bg-zinc-700/50 text-gray-500 dark:text-gray-400 text-sm border border-gray-200 dark:border-gray-600"
+              title="该地址在监控列表中，但当前已暂停"
+            >
+              ⏸ 监控已暂停
+            </span>
           ) : (
             <span className="inline-flex items-center h-9 px-3 rounded-xl bg-success-50 dark:bg-success-500/10 text-success-600 dark:text-success-400 text-sm border border-success-200 dark:border-success-500/30">
               ✓ 已在监控

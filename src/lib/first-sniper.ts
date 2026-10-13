@@ -4,10 +4,11 @@
  * 然后识别第一个狙击者（最早买入的）、跟随者、自己账号。
  */
 
-import { query, queryOne } from './db';
+import { query, queryOne, execute } from './db';
 import { getHelius, parsedEventItemToEnhanced } from './helius';
 import { getRPC } from './solana-rpc';
 import { parseHeliusTx, parseBlockTxs, type ParsedBuy } from './parser';
+import { calcCopyPnl } from './pnl';
 import type { BlockBuyer } from './types';
 
 export interface AnalyzeBuyer {
@@ -361,3 +362,139 @@ export async function getBlockAnalysis(slot: number, mint: string): Promise<{
   );
   return { analysis: a, buyers };
 }
+
+/**
+ * 批量算一个 block 里所有 buyer 的跟单收益，并行跑 + 写回 DB。
+ *
+ * 用途：UI 展开 block 时一次算完所有 buyer，不用每个点"算收益"。
+ * 设计：
+ *   - 并发度受 BULK_PNL_CONCURRENCY 控制（默认 4），避免对 Helius/RPC 雪崩
+ *   - 单个 buyer 失败不影响其他（catch 内 swallow + 标 'error'）
+ *   - 返回结果与原 buyer 列表长度一致，按 buyer.id 顺序对齐
+ *
+ * 性能参考（实测）：
+ *   - 20 笔 buyer × calcCopyPnl(每笔 ~3-8s) ÷ 4 并发 ≈ 15-40s
+ *   - 之后再访问同一个 block 直接走 DB 缓存，秒开
+ */
+export interface BulkBuyerPnLProgress {
+  done: number;
+  total: number;
+}
+
+export interface BulkBuyerPnLResult {
+  buyerId: number;
+  pnlSol: number | null;
+  status: 'closed' | 'partial' | 'open' | 'buy_failed' | 'error';
+  soldRatio: number | null;
+}
+
+const BULK_PNL_CONCURRENCY = Math.max(
+  1,
+  parseInt(process.env.BULK_PNL_CONCURRENCY || '4', 10),
+);
+
+/** 把 N 个 task 按并发上限执行，onProgress 每完成一个回调一次 */
+async function runWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<R>,
+  onProgress?: (done: number, total: number) => void,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  let done = 0;
+  async function next(): Promise<void> {
+    const i = cursor++;
+    if (i >= items.length) return;
+    try {
+      results[i] = await worker(items[i]);
+    } finally {
+      done++;
+      onProgress?.(done, items.length);
+      await next();
+    }
+  }
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => next());
+  await Promise.all(workers);
+  return results;
+}
+
+/**
+ * 一次性算 block 里所有 buyer 的 PnL，写回 block_buyers。
+ * 已经算过（pnl_status 非空）的会跳过 —— 用户点过"算收益"的会保留。
+ *
+ * 用法：被 /api/block/[slot]/[mint]/pnl POST 调用
+ */
+export async function computeBulkBuyerPnL(
+  slot: number,
+  mint: string,
+  opts: { force?: boolean; onProgress?: (p: BulkBuyerPnLProgress) => void } = {},
+): Promise<{ results: BulkBuyerPnLResult[]; analysis: any; skippedExisting: number }> {
+  const got = await getBlockAnalysis(slot, mint);
+  if (!got) return { results: [], analysis: null, skippedExisting: 0 };
+  const { analysis, buyers } = got;
+
+  // 决定哪些需要重算：
+  //   - 目标 / 我的账号：默认重算（这些是用户最想看的）
+  //   - 失败 tx：跳过（pnl_status='buy_failed' 已经写死了）
+  //   - 其他人：有 pnl_status 就跳过（除非 force=true）
+  //   - 都没算过的：全跑
+  const toCompute = buyers.filter((b) => {
+    if (opts.force) return true;
+    if (b.result === 'failed') return false; // 买入失败，pnl 固定就是手续费
+    if (b.is_own || b.is_first_sniper || b.signature === analysis.target_signature) return true;
+    if (!b.pnl_status) return true;
+    return false;
+  });
+  const skippedExisting = buyers.length - toCompute.length;
+
+  if (toCompute.length === 0) {
+    return { results: [], analysis, skippedExisting };
+  }
+
+  const blockTime = Math.floor(new Date(analysis.block_time).getTime() / 1000);
+
+  const results = await runWithConcurrency(
+    toCompute,
+    BULK_PNL_CONCURRENCY,
+    async (buyer): Promise<BulkBuyerPnLResult> => {
+      try {
+        const tokenAmount =
+          buyer.token_amount != null ? Number(buyer.token_amount) : null;
+        const r = await calcCopyPnl({
+          mint,
+          buySig: buyer.signature,
+          buyWallet: buyer.address,
+          buySol: parseFloat(String(buyer.buy_sol)),
+          buyBlockTime: blockTime,
+          buyTokenAmount: tokenAmount,
+        });
+        // 写回 DB
+        await execute(
+          `UPDATE block_buyers
+              SET pnl_sol = $1, pnl_status = $2, pnl_sold_ratio = $3, token_amount = COALESCE($4, token_amount)
+            WHERE id = $5`,
+          [r.pnlSol, r.status, r.soldRatio, tokenAmount, buyer.id],
+        );
+        return {
+          buyerId: buyer.id,
+          pnlSol: r.pnlSol,
+          status: r.status,
+          soldRatio: r.soldRatio,
+        };
+      } catch (err: any) {
+        console.warn(`[bulk-pnl] buyer ${buyer.id} 失败:`, err?.message ?? err);
+        return {
+          buyerId: buyer.id,
+          pnlSol: null,
+          status: 'error' as const,
+          soldRatio: null,
+        };
+      }
+    },
+    (done, total) => opts.onProgress?.({ done, total }),
+  );
+
+  return { results, analysis, skippedExisting };
+}
+
