@@ -173,10 +173,13 @@ function ownersOf(tx: HeliusEnhancedTx, wallet: string): string[] {
 
 export function heliusTxView(tx: HeliusEnhancedTx | null): TxView | null {
   if (!tx) return null;
+  const txAny = tx as any;
   return {
     signature: tx.signature,
-    slot: (tx as any).slot ?? 0,
-    blockTime: (tx as any).blockTime ?? 0,
+    // Helius Enhanced API（/v0/transactions）把 slot/blockTime 放在 data 子对象下；
+    // Parsed Events API（parsedEventItemToEnhanced）直接放在顶层，兼容两种路径。
+    slot: txAny.data?.slot ?? txAny.slot ?? 0,
+    blockTime: txAny.data?.blockTime ?? txAny.blockTime ?? 0,
     feeLamports: tx.fee ?? 0,
     failed: isFailedTx(tx),
     tokenDelta(mint: string, wallet: string): number {
@@ -245,15 +248,12 @@ export async function fetchTxViews(
 ): Promise<Array<TxView | null>> {
   if (sigs.length === 0) return [];
 
-  // ---- Helius 增强 API ----
+  // ---- Helius Enhanced Transactions API ----
   if (activeSource() === 'helius' || (activeSource() === 'auto' && !_heliusDead)) {
     try {
       const { getHelius } = await import('./helius');
-      const parsed = await getHelius().parseEventsAsEnhanced(sigs);
-      // Helius 返回按时间倒序，不按请求顺序，必须按签名对齐
-      const bySig = new Map<string, HeliusEnhancedTx>();
-      for (const t of parsed) if (t) bySig.set(t.signature, t);
-      return sigs.map((s) => heliusTxView(bySig.get(s) ?? null));
+      const txMap = await getHelius().batchFetchEnhanced(sigs);
+      return sigs.map((s) => heliusTxView(txMap.get(s) ?? null));
     } catch (err: any) {
       const status = err?.response?.status ?? err?.status;
       if (status === 429 || /max usage|quota|rate/i.test(err?.message ?? '')) {
@@ -261,10 +261,12 @@ export async function fetchTxViews(
         _heliusDead = true;
       } else if (activeSource() === 'helius') {
         // 显式要求 helius 却报别的错，仍然退回去，否则整条链路瘫掉
-        console.warn('[tx-source] Helius 取数失败，退回公共 RPC:', (err as Error).message);
+        console.warn('[tx-source] Helius Enhanced 取数失败，退回公共 RPC:', (err as Error).message);
         _heliusDead = true;
       } else {
-        throw err;
+        // auto 模式：任何 Helius 错误都 fallback 到公共 RPC，不抛错
+        console.warn('[tx-source] Helius Enhanced 取数失败，退回公共 RPC:', (err as Error).message);
+        _heliusDead = true;
       }
     }
   }

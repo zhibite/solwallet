@@ -48,7 +48,7 @@ export async function GET(req: NextRequest) {
     // —— 只算"被抢过的那笔"，避免给前端返回「刚发生、sniper 还在分析中」的最新 trade（first_sniper 必然 null）
     const sql = `
       SELECT mt.id, mt.address, mt.label, mt.threshold_sol::text, mt.status,
-             mt.created_at, mt.updated_at, mt.last_buy_at, mt.record_count,
+             mt.created_at, mt.updated_at, mt.last_buy_at, mt.record_count, mt.auto_follow,
              s.first_sniper            AS last_sniper_address,
              s.first_sniper_signature  AS last_sniper_signature,
              s.first_sniper_offset_pos AS last_sniper_offset_pos,
@@ -59,12 +59,13 @@ export async function GET(req: NextRequest) {
              s.slot                    AS last_sniper_slot,
              s.mint                    AS last_sniper_mint,
              s.block_time              AS last_sniper_block_time,
-             s.first_sniper_tip_source AS last_sniper_tip_source
+             s.first_sniper_tip_source AS last_sniper_tip_source,
+             s.pnl_sol                 AS last_sniper_pnl_sol
       FROM monitored_targets mt
       LEFT JOIN LATERAL (
         SELECT t.first_sniper, t.first_sniper_signature, t.first_sniper_offset_pos,
                t.first_sniper_offset_ms, t.first_sniper_tip_sol, t.first_sniper_prio_lamports,
-               t.first_sniper_buy_sol, t.slot, t.mint, t.block_time,
+               t.first_sniper_buy_sol, t.slot, t.mint, t.block_time, t.pnl_sol,
                bb.tip_source AS first_sniper_tip_source
         FROM target_trades t
         LEFT JOIN block_buyers bb ON bb.signature = t.first_sniper_signature
@@ -84,7 +85,7 @@ export async function GET(req: NextRequest) {
       const { last_sniper_address, last_sniper_signature, last_sniper_offset_pos,
               last_sniper_offset_ms, last_sniper_tip_sol, last_sniper_prio_lamports,
               last_sniper_buy_sol, last_sniper_slot, last_sniper_mint, last_sniper_block_time,
-              last_sniper_tip_source,
+              last_sniper_tip_source, last_sniper_pnl_sol,
               ...rest } = r;
       return {
         ...rest,
@@ -100,6 +101,7 @@ export async function GET(req: NextRequest) {
           mint: last_sniper_mint,
           block_time: last_sniper_block_time,
           tip_source: last_sniper_tip_source,
+          pnl_sol: last_sniper_pnl_sol,
         },
       };
     });
@@ -114,21 +116,25 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { address, label, threshold_sol = 1 } = body || {};
+    const { address, label, threshold_sol = 0.8 } = body || {};
     if (!address || typeof address !== 'string' || address.length < 32 || address.length > 44) {
       return NextResponse.json({ ok: false, error: 'address 不合法' }, { status: 400 });
     }
 
+    // 用 CTE 判断是 INSERT 还是 UPDATE（ON CONFLICT 时 xmax = 0 表示新插入）
     const row = await queryOne<any>(
-      `INSERT INTO monitored_targets (address, label, threshold_sol)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (address) DO UPDATE SET label = EXCLUDED.label, threshold_sol = EXCLUDED.threshold_sol
-       RETURNING *`,
+      `WITH ins AS (
+        INSERT INTO monitored_targets (address, label, threshold_sol)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (address) DO UPDATE SET label = EXCLUDED.label, threshold_sol = EXCLUDED.threshold_sol
+        RETURNING *, (xmax = 0) AS is_new
+      )
+      SELECT *, is_new FROM ins`,
       [address, label || null, threshold_sol],
     );
     // 异步同步 Helius webhook（新增/更新后让 Helius 立即知道地址变更）
     syncWebhookAsync();
-    return NextResponse.json({ ok: true, data: row });
+    return NextResponse.json({ ok: true, data: row, isNew: row?.is_new ?? false });
   } catch (err: any) {
     return NextResponse.json({ ok: false, error: err.message }, { status: 500 });
   }

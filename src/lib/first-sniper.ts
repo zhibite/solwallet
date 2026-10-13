@@ -7,7 +7,7 @@
 import { query, queryOne, execute } from './db';
 import { getHelius, parsedEventItemToEnhanced } from './helius';
 import { getRPC } from './solana-rpc';
-import { parseHeliusTx, parseBlockTxs, type ParsedBuy } from './parser';
+import { parseHeliusTx, parseBlockTxs, calcBuySol, findInboundTransfer, type ParsedBuy } from './parser';
 import { calcCopyPnl } from './pnl';
 import type { BlockBuyer } from './types';
 
@@ -111,6 +111,8 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
     ...nextSlotBuys.map((b) => ({ ...b, _slot: slotNum + 1 })),
   ];
   const sigs = allRawBuys.map((b) => b.signature);
+
+  // 5a) 先拿 Parsed Events（10 cr）：用于 tipSource / bundleId 等元数据
   let enhancedMap = new Map<string, NonNullable<ReturnType<typeof parseHeliusTx>>>();
   if (sigs.length > 0 && sigs.length <= 100) {
     try {
@@ -128,20 +130,67 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
     }
   }
 
+  // 5b) 再拿 Enhanced Transactions API（100 cr/request）：用于 buySol（nativeTransfers 计算）
+  //     优先用这个，与参考网站口径对齐；拿不到才 fallback 到 RPC 余额差
+  const enhancedBuySolMap = new Map<string, { buySol: number; tokenAmount: number | null }>();
+  if (sigs.length > 0 && sigs.length <= 15) {
+    // Enhanced Tx 端点单批上限 15 条签名，超过则跳过（用 RPC 兜底）
+    try {
+      const enhancedRawMap = await helius.batchFetchEnhanced(sigs);
+      for (const [sig, tx] of enhancedRawMap) {
+        const buySol = calcBuySol(tx);
+        const tokenAmt = findInboundTransfer(tx)?.tokenAmount ?? null;
+        enhancedBuySolMap.set(sig, { buySol, tokenAmount: tokenAmt });
+      }
+    } catch (err) {
+      console.warn('[analyzeBlock] batchFetchEnhanced failed, buySol falls back to RPC', err);
+    }
+  } else if (sigs.length > 15) {
+    // 超过 15 条时，分批调用（每批 15 条）
+    try {
+      for (let i = 0; i < sigs.length; i += 15) {
+        const batch = sigs.slice(i, i + 15);
+        const enhancedRawMap = await helius.batchFetchEnhanced(batch);
+        for (const [sig, tx] of enhancedRawMap) {
+          const buySol = calcBuySol(tx);
+          const tokenAmt = findInboundTransfer(tx)?.tokenAmount ?? null;
+          enhancedBuySolMap.set(sig, { buySol, tokenAmount: tokenAmt });
+        }
+        // 批次间隔 200ms 避免 Helius 限流
+        if (i + 15 < sigs.length) await new Promise((r) => setTimeout(r, 200));
+      }
+    } catch (err) {
+      console.warn('[analyzeBlock] batchFetchEnhanced (batched) failed, buySol falls back to RPC', err);
+    }
+  }
+
   // 6) 取自己的钱包列表
   const ownWallets = (await query<{ address: string }>('SELECT address FROM own_wallets')).map((w) => w.address);
   const ownSet = new Set(ownWallets);
 
   // 7) 合并并排序：同 slot 按 blockIndex 升序，跨 slot 时同 slot 在前
-  type Enriched = { buy: ParsedBuy; slot: number; slotOffset: 0 | 1; offsetMs: number; enrichedBuy: NonNullable<ReturnType<typeof parseHeliusTx>> | ParsedBuy };
+  type Enriched = {
+    buy: ParsedBuy;
+    slot: number;
+    slotOffset: 0 | 1;
+    offsetMs: number;
+    /** 来自 Enhanced Transactions API 的 buySol，优先于 buy.buySol */
+    buySolOverride?: number;
+    /** 来自 Enhanced Transactions API 的 tokenAmount，优先于 buy.tokenAmount */
+    tokenAmountOverride?: number | null;
+  };
   const enriched: Enriched[] = allRawBuys.map((b) => {
     const e = enhancedMap.get(b.signature);
+    // 优先用 Enhanced Transactions API 的 buySol 和 tokenAmount（来自 nativeTransfers / tokenTransfers）
+    // 与参考网站口径一致；拿不到时 fallback 到 RPC 余额差（parseBlockTxs 结果）
+    const buySolData = enhancedBuySolMap.get(b.signature);
     return {
       buy: e ?? b,
       slot: b._slot,
       slotOffset: b._slot === slotNum ? 0 : 1,
       offsetMs: targetBlockTime ? (b.blockTime - targetBlockTime) * 1000 : 0,
-      enrichedBuy: e ?? b,
+      buySolOverride: buySolData?.buySol,
+      tokenAmountOverride: buySolData?.tokenAmount,
     };
   });
 
@@ -185,10 +234,12 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
       slotOffset: e.slotOffset,
       signature: e.buy.signature,
       address: e.buy.address,
-      buySol: e.buy.buySol,
+      // 优先用 Enhanced Transactions API 的 buySol（nativeTransfers 计算），与参考网站口径一致
+      buySol: e.buySolOverride ?? e.buy.buySol,
       tipSol: e.buy.tipSol,
       prioLamports: e.buy.prioLamports,
-      tokenAmount: e.buy.tokenAmount ?? null,
+      // 同样优先用 Enhanced API 的 tokenAmount（来自 tokenTransfers 中 toUserAccount=feepayer 的最大那笔）
+      tokenAmount: e.tokenAmountOverride ?? e.buy.tokenAmount ?? null,
       result: e.buy.success ? 'success' : 'failed',
       version: e.buy.version,
       isBundled: e.buy.isBundled,

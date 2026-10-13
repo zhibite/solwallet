@@ -132,10 +132,12 @@ export interface BlockBuyer {
   tip_source: TipSource | null;
   /** 0007: 这笔买入收到的 token 数量，单笔跟单收益按它做 FIFO 配对 */
   token_amount: string | null;
-  /** 0007: open=持仓中 / closed=已平仓 / partial=部分平仓 / buy_failed=买入失败 */
+  /** open=持仓中 / closed=已平仓 / partial=部分平仓 / buy_failed=买入失败 */
   pnl_status: string | null;
-  /** 0007: 该笔买入的 token 已卖出比例 0~1 */
+  /** 该笔买入的 token 已卖出比例 0~1 */
   pnl_sold_ratio: string | null;
+  /** 0018: 该笔是否是目标本人（signature = analysis.target_signature） */
+  is_self: boolean;
 }
 
 /** Helius Enhanced Transaction 简化结构 */

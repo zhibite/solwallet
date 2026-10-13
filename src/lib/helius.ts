@@ -247,6 +247,59 @@ export class HeliusClient {
   }
 
   /**
+   * 直接调用 Helius Enhanced Transactions API（/v0/transactions）批量获取增强交易数据。
+   *
+   * 与 parseEvents（Parsed Events API）的区别：
+   *   - Enhanced Tx:  100 cr/request（legacy，maintenance mode），nativeTransfers 解析最完整
+   *   - Parsed Events: 10 cr/request，解析口径可能与 Enhanced 有细微差异
+   *
+   * 返回 Map<signature, HeliusEnhancedTx>，方便 O(1) 按签名查。
+   * Enhanced Transactions API 的响应格式与 HeliusEnhancedTx 类型完全一致，直接 cast 使用。
+   *
+   * @param signatures 签名列表（上限 15 条，受 Helius 端点限制）
+   */
+  async batchFetchEnhanced(signatures: string[]): Promise<Map<string, HeliusEnhancedTx>> {
+    if (signatures.length === 0) return new Map();
+    const { data } = await this.http.post(
+      '/v0/transactions',
+      {
+        transactions: signatures,
+        // 设为 false 避免解析未上链的交易，省 credits
+        decodeUnsubmittedTransactions: false,
+      },
+      { timeout: 30_000 },
+    );
+    const out = new Map<string, HeliusEnhancedTx>();
+    if (!Array.isArray(data)) return out;
+    for (const raw of data as Record<string, any>[]) {
+      if (!raw?.signature) continue;
+      // Helius Enhanced API 把解析结果放在 data 子对象里；把它展开到顶层，
+      // 与 parsedEventItemToEnhanced / solanaTxToHeliusEnhanced 的形状对齐。
+      const d = raw.data ?? raw;
+      const enhanced: HeliusEnhancedTx = {
+        signature: d.signature ?? raw.signature,
+        slot: d.slot ?? 0,
+        blockTime: d.blockTime ?? 0,
+        fee: d.fee ?? 0,
+        feePayer: d.feePayer ?? '',
+        version: d.version ?? 'legacy', // Helius Enhanced API 里 version 在 data 子对象里
+        tokenTransfers: d.tokenTransfers,
+        nativeTransfers: d.nativeTransfers,
+        instructions: d.instructions,
+        source: d.source,
+        type: d.type,
+        description: d.description,
+        transactionError: d.transactionError,
+        accountData: d.accountData,
+        events: raw.events ?? d.events,
+      };
+      (enhanced as any)._enhancedSource = true;
+      out.set(enhanced.signature, enhanced);
+    }
+    return out;
+  }
+
+  /**
    * 带 fallback 的单笔交易解析
    * 1) 先走 Helius Parsed Events（首选，10 cr，且能区分 Enhanced 没有的字段如 version/ALT）
    * 2) 失败 / 限流（429/503/5xx）/ 抛错 → 用 6 个公共 RPC 的 getTransaction 兜底，

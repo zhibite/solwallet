@@ -79,5 +79,14 @@ export async function register() {
     } catch (err) {
       console.error('[instrumentation] akbot backfill worker failed to start', err);
     }
+
+    // PnL 计算 Worker（后台常驻任务，自动计算 block_buyers 的跟单收益）
+    try {
+      const { startPnlWorker } = await import('./lib/pnl-worker');
+      await startPnlWorker();
+      console.log('[instrumentation] pnl worker started');
+    } catch (err) {
+      console.error('[instrumentation] pnl worker failed to start', err);
+    }
   }
 }

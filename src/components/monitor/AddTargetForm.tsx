@@ -9,7 +9,7 @@ interface Props {
 export default function AddTargetForm({ onAdd }: Props) {
   const [address, setAddress] = useState("");
   const [label, setLabel] = useState("");
-  const [threshold, setThreshold] = useState("1");
+  const [threshold, setThreshold] = useState("0.8");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -22,7 +22,7 @@ export default function AddTargetForm({ onAdd }: Props) {
     }
     setLoading(true);
     try {
-      await onAdd({ address, label: label || undefined, threshold_sol: parseFloat(threshold) || 1 });
+      await onAdd({ address, label: label || undefined, threshold_sol: parseFloat(threshold) || 0.8 });
       setAddress("");
       setLabel("");
     } catch (err: any) {

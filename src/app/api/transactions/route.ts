@@ -1,6 +1,6 @@
 /**
  * /api/transactions
- * GET - 查询交易列表（支持 target / mint / 时间范围过滤）
+ * GET - 查询交易列表（支持 target / mint / first_only / 时间范围过滤）
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
@@ -14,6 +14,7 @@ export async function GET(req: NextRequest) {
   const to = searchParams.get('to');
   const confirmed = searchParams.get('confirmed'); // true/false
   const limit = parseInt(searchParams.get('limit') || '200', 10);
+  const firstOnly = searchParams.get('first_only') === '1';
 
   const conditions: string[] = [];
   const params: any[] = [];
@@ -77,7 +78,14 @@ export async function GET(req: NextRequest) {
   `;
   try {
     const rows = await query<any>(sql, params);
-    return NextResponse.json({ ok: true, data: rows });
+    // 同一 token 只看首单：在 JS 侧去重，每个 mint 只保留 block_time 最早的那条
+    const data = firstOnly
+      ? Object.values(rows.reduce<Record<string, any>>((acc, r) => {
+          if (!acc[r.mint]) acc[r.mint] = r;
+          return acc;
+        }, {}))
+      : rows;
+    return NextResponse.json({ ok: true, data });
   } catch (err: any) {
     return NextResponse.json({ ok: false, error: err.message }, { status: 500 });
   }
