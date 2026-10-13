@@ -54,7 +54,8 @@ logs/
 
 # 临时调试脚本/截图（不纳入版本控制）
 /tmp
-# 根目录下的一次性探针与回归日志：_creditprobe.js / _reg2.txt …
-# 这些是为排查配额、限流、PnL 回归临时写的一次性产物，跑完即弃。
-/_*.js
-/_*.txt
+# 诊断 / benchmark / 临时探针脚本（跑完即弃，不进版本）
+scripts/_diag-*.ts
+scripts/_bench-*.ts
+scripts/_drop-*.ts
+scripts/_list-*.ts

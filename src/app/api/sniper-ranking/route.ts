@@ -7,12 +7,38 @@
  *   - limit:  每页条数，默认 30
  *   - offset: 跳过条数，默认 0
  *   - sort:   'count' | 'pnl' | 'win_rate' | 'avg_offset'，默认 'count'
+ *   - fresh:  1 时跳过 total 内存缓存（强制重算），用于：
+ *             1) 监控/扫描任务刚把新分析写库后立刻刷新
+ *             2) 排查缓存异常
  *
- * Response: { ok: true, data: [...], total: number }
+ * Response: { ok: true, data: [...], total: number, cached: boolean }
  *   - total 为满足筛选条件的地址总数（用于分页计算）
+ *   - cached=true 表示 total 来自 30s 内存缓存
+ *
+ * 性能（实测，DB 规模 7090 block_analyses / 26639 block_buyers / 3535 first_sniper）：
+ *   单次 mainSql warm ~5-7ms SQL + 一次 round-trip。翻页时 total 不变，
+ *   不应每次重算 COUNT(DISTINCT address)。缓存命中后翻页只跑 mainSql。
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+
+// total 内存缓存：跨请求共享。key = `${from}|${sort}`，TTL 30s。
+// globalThis 上挂避开 Next.js dev 模式 HMR 时模块重载把变量清掉。
+declare global {
+  // eslint-disable-next-line no-var
+  var __sniperRankingTotalCache:
+    | Map<string, { total: number; expiresAt: number }>
+    | undefined;
+}
+
+const TOTAL_CACHE_TTL_MS = 30_000;
+
+function getTotalCache(): Map<string, { total: number; expiresAt: number }> {
+  if (!globalThis.__sniperRankingTotalCache) {
+    globalThis.__sniperRankingTotalCache = new Map();
+  }
+  return globalThis.__sniperRankingTotalCache;
+}
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
@@ -20,6 +46,7 @@ export async function GET(req: NextRequest) {
   const limit = Math.min(parseInt(searchParams.get('limit') || '30', 10), 500);
   const offset = Math.max(parseInt(searchParams.get('offset') || '0', 10), 0);
   const sort = searchParams.get('sort') || 'count';
+  const forceFresh = searchParams.get('fresh') === '1';
 
   const orderBy = (() => {
     switch (sort) {
@@ -32,16 +59,45 @@ export async function GET(req: NextRequest) {
   })();
 
   try {
-    // 先统计总数（用于分页）
-    const totalSql = `
-      SELECT COUNT(DISTINCT b.address) AS total
-      FROM block_buyers b
-      JOIN block_analyses ba ON ba.id = b.block_analysis_id
-      WHERE b.is_first_sniper = true
-        AND ba.block_time >= $1
-    `;
-    const totalRes = await query<{ total: string }>(totalSql, [from]);
-    const total = parseInt(totalRes[0]?.total || '0', 10);
+    // 先统计总数（用于分页）。在 days/sort 不变时 total 是常量，30s TTL 缓存。
+    // 翻页（offset 变化）共享同一 total。
+    const cacheKey = `${from}|${sort}`;
+    const cache = getTotalCache();
+    let total: number;
+    let cached = false;
+    const now = Date.now();
+
+    if (!forceFresh) {
+      const hit = cache.get(cacheKey);
+      if (hit && hit.expiresAt > now) {
+        total = hit.total;
+        cached = true;
+      } else {
+        const totalSql = `
+          SELECT COUNT(DISTINCT b.address) AS total
+          FROM block_buyers b
+          JOIN block_analyses ba ON ba.id = b.block_analysis_id
+          WHERE b.is_first_sniper = true
+            AND ba.block_time >= $1
+        `;
+        const totalRes = await query<{ total: string }>(totalSql, [from]);
+        total = parseInt(totalRes[0]?.total || '0', 10);
+        cache.set(cacheKey, { total, expiresAt: now + TOTAL_CACHE_TTL_MS });
+        // 简单淘汰：超过 64 个 key 时全清，避免长期累积
+        if (cache.size > 64) cache.clear();
+      }
+    } else {
+      const totalSql = `
+        SELECT COUNT(DISTINCT b.address) AS total
+        FROM block_buyers b
+        JOIN block_analyses ba ON ba.id = b.block_analysis_id
+        WHERE b.is_first_sniper = true
+            AND ba.block_time >= $1
+      `;
+      const totalRes = await query<{ total: string }>(totalSql, [from]);
+      total = parseInt(totalRes[0]?.total || '0', 10);
+      cache.set(cacheKey, { total, expiresAt: now + TOTAL_CACHE_TTL_MS });
+    }
 
     // 聚合：每个 sniper 地址的统计
     // offset_pos 为负数表示抢在目标之前；越负越早抢到
@@ -84,7 +140,7 @@ export async function GET(req: NextRequest) {
       LIMIT $2 OFFSET $3
     `;
     const rows = await query<any>(sql, [from, limit, offset]);
-    return NextResponse.json({ ok: true, data: rows, total });
+    return NextResponse.json({ ok: true, data: rows, total, cached });
   } catch (err: any) {
     return NextResponse.json({ ok: false, error: err.message }, { status: 500 });
   }
