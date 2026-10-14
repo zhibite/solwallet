@@ -14,6 +14,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { markAsAkbot, unmarkAsAkbot, getPoolMember } from '@/lib/pool';
 
+/**
+ * 把任意字符串 hex 编码，用于安全嵌入带分隔符的字符串。
+ * 防止 note 里的 `:` 或其他特殊字符干扰 evidenceSig 的格式约定。
+ */
+function hexEncode(raw: string): string {
+  const buf = Buffer.from(raw, 'utf8');
+  return buf.toString('hex');
+}
+
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ address: string }> },
@@ -28,14 +37,17 @@ export async function POST(
       typeof body?.tagger === 'string' && body.tagger.trim()
         ? body.tagger.trim().slice(0, 64)
         : 'ui';
-    const note: string | null =
+
+    // 安全修复（HIGH #7）：note 字段 hex 编码后嵌入签名串，避免内容注入污染格式
+    const rawNote: string | null =
       typeof body?.note === 'string' && body.note.trim()
         ? body.note.trim().slice(0, 256)
         : null;
+    const encodedNote = rawNote ? hexEncode(rawNote) : null;
 
-    // 手动标注也写到 akbot_evidence_sig 里，约定前缀 `manual:` 以便和真实 sig 区分。
-    // 真实 sig 形如 5ZRqdvTtqQ3sRKBv...，manual sig 形如 manual:ui:2026-10-06T17:00:00Z
-    const evidenceSig = `manual:${tagger}:${new Date().toISOString()}${note ? `:${note}` : ''}`;
+    // evidenceSig 格式：manual:<tagger>:<iso8601>[:<hex_note>]
+    // hex 编码后不含 : 和空格，不会破坏格式解析
+    const evidenceSig = `manual:${tagger}:${new Date().toISOString()}${encodedNote ? `:${encodedNote}` : ''}`;
 
     // 先确认地址在池子里（不在的话 INSERT 兜底写入一条 follower 行）
     const existed = await getPoolMember(address);

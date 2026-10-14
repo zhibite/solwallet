@@ -57,12 +57,12 @@ function parseBasicAuth(header: string | null): { user: string; pass: string } |
 }
 
 /**
- * 临时禁用（用户反馈先把鉴权去掉）
+ * 重新启用鉴权
  *
- * 恢复鉴权：把 `DISABLED_FOR_NOW` 改回 `false` 即可，
+ * 恢复鉴权：把 `DISABLED_FOR_NOW` 改回 `true` 即可，
  *          配套 .env 里 AGENT_BASIC_USER + AGENT_BASIC_PASS 仍保留
  */
-const DISABLED_FOR_NOW = true;
+const DISABLED_FOR_NOW = false;
 
 /**
  * 给 /api/agent/* 各 route handler 在开头调一次。

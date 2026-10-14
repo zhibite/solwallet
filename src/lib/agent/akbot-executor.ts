@@ -620,7 +620,7 @@ function buildAddDtoFromTarget(target: TargetRow): AkBotAddDTO {
 
   const buyDetail: AkBuyDetail = {
     buyMode: 1,                                            // 固定金额
-    buyAmount: clampNumber(params.position_sol, 0.01, 60, 1.0),
+    buyAmount: clampNumber(params.position_sol, 0.01, 5, 1.0),
     tipFee: clampNumber(params.tip_sol, 0.0001, 100, 0.001),
     gasFee: clampNumber(params.gas_sol, 0.000005, 20, 0.001),
     slippageBuy: clampNumber(params.slippage, 0, 500, 20), // 百分比
@@ -681,7 +681,7 @@ function mergeDecisionParams(
     });
   }
   const d = result.akBuyDetails[0];
-  if ('position_sol' in params)   d.buyAmount        = clampNumber(params.position_sol as number, 0.01, 60, d.buyAmount);
+  if ('position_sol' in params)   d.buyAmount        = clampNumber(params.position_sol as number, 0.01, 5, d.buyAmount);
   if ('tip_sol' in params)        d.tipFee           = clampNumber(params.tip_sol as number, 0.0001, 100, d.tipFee);
   if ('gas_sol' in params)        d.gasFee           = clampNumber(params.gas_sol as number, 0.000005, 20, d.gasFee);
   if ('slippage' in params)       d.slippageBuy      = clampNumber(params.slippage as number, 0, 500, d.slippageBuy);

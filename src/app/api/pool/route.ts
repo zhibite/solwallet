@@ -15,8 +15,10 @@ export async function GET(req: NextRequest) {
     const isAkbot = searchParams.get('akbot');
     const address = searchParams.get('address') ?? undefined;
     const sortBy = (searchParams.get('sort') ?? 'freq') as 'freq' | 'score' | 'seen';
-    const limit = parseInt(searchParams.get('limit') ?? '100', 10);
-    const offset = parseInt(searchParams.get('offset') ?? '0', 10);
+    // 安全修复（MEDIUM #8）：limit 上限 1000，防客户端传超大数据导致内存问题
+    const rawLimit = parseInt(searchParams.get('limit') ?? '100', 10);
+    const limit = Math.min(Math.max(1, rawLimit || 100), 1000);
+    const offset = Math.max(0, parseInt(searchParams.get('offset') ?? '0', 10));
 
     const [members, total, stats] = await Promise.all([
       listPoolMembers({
