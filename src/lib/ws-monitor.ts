@@ -18,7 +18,7 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import { query } from './db';
 import { parseHeliusTx } from './parser';
-import { saveBlockAnalysis } from './first-sniper';
+import { saveBlockAnalysis, applyFirstSniperToTarget } from './first-sniper';
 import { scanForTarget } from './pool';
 import { quickAkbotCheck, isAkbotCircuitOpen } from './akbot';
 import { markAsAkbot } from './pool';
@@ -302,7 +302,7 @@ function handleDisconnect() {
   // 清理订阅
   s.subscriptions.clear();
   if (s.pumpFunSubscriptionId !== null && s.wsConnection) {
-    s.wsConnection.removeListener(s.pumpFunSubscriptionId);
+    s.wsConnection.removeLogsListener(s.pumpFunSubscriptionId);
     s.pumpFunSubscriptionId = null;
   }
 
@@ -389,16 +389,13 @@ function startTargetRefresh() {
 async function refreshAndSubscribeTargets() {
   const s = getState();
   try {
-    // 从数据库获取活跃目标
-    // Pump.fun mints 只取最近 24h 创建的，避免 WS 订阅数膨胀
+    // 订阅所有 status='active' 的目标（pump 自动目标和手动目标一视同仁），
+    // 因为 24h 之后的 pump 目标如果还在被买入，WS 漏了以后只能等轮询兜底（5-15s 延迟），
+    // 对抢单场景是致命的。Solana 公共节点单连接 WS 订阅数上限约 1000-2000，正常使用足够。
     const targets = await query<{ address: string }>(`
       SELECT DISTINCT address
       FROM monitored_targets
       WHERE status = 'active'
-        AND (
-          label NOT LIKE 'pump:%'
-          OR created_at >= NOW() - INTERVAL '24 hours'
-        )
     `);
 
     const newAddresses = new Set<string>();
@@ -479,7 +476,7 @@ async function unsubscribe(address: string) {
   if (subscriptionId === undefined) return;
 
   try {
-    await s.wsConnection.removeListener(subscriptionId);
+    await s.wsConnection.removeLogsListener(subscriptionId);
     s.subscriptions.delete(address);
     console.log(`[ws-monitor] unsubscribed from ${address.slice(0, 8)}...`);
   } catch (err) {
@@ -770,7 +767,7 @@ async function unsubscribeAll() {
   for (const [address, subscriptionId] of s.subscriptions) {
     try {
       if (s.wsConnection) {
-        await s.wsConnection.removeListener(subscriptionId);
+        await s.wsConnection.removeLogsListener(subscriptionId);
       }
     } catch (err) {
       console.error(`[ws-monitor] error removing subscription ${subscriptionId}:`, err);
@@ -791,9 +788,9 @@ async function unsubscribePumpFun() {
     return;
   }
   try {
-    s.wsConnection.removeListener(s.pumpFunSubscriptionId);
+    s.wsConnection.removeLogsListener(s.pumpFunSubscriptionId);
   } catch (err) {
-    console.warn('[ws-monitor] removeListener pumpFun failed:', err);
+    console.warn('[ws-monitor] removeLogsListener pumpFun failed:', err);
   }
   s.pumpFunSubscriptionId = null;
 }
@@ -979,10 +976,21 @@ async function ingestWsTrade(targetId: number, buy: any, rawTx: any) {
     );
   }
 
-  // 1.5) 计数
+  // 1.5) 计数 + 推进 last_buy_at
+  //    ws 订阅有重连重放机制，同一 sig 可能多次触发 ingestWsTrade：
+  //    - 第一次：INSERT → was_inserted = true → record_count +1，last_buy_at = NOW()
+  //    - 后续重放：ON CONFLICT UPDATE → was_inserted = false → 只更新 last_buy_at = NOW()
+  //    这样无论重放几次，last_buy_at 永远推进到最新处理时间，poll 的
+  //    blockTime > lastBuyAtSec 过滤正确工作（blockTime 旧则被挡，实时则通过）。
   if (inserted.was_inserted) {
     await query(
-      'UPDATE monitored_targets SET record_count = record_count + 1 WHERE id = $1',
+      'UPDATE monitored_targets SET record_count = record_count + 1, last_buy_at = NOW() WHERE id = $1',
+      [targetId],
+    );
+  } else {
+    // ON CONFLICT（重放）：不重复计数，但必须推进 last_buy_at
+    await query(
+      'UPDATE monitored_targets SET last_buy_at = NOW() WHERE id = $1',
       [targetId],
     );
   }
@@ -996,28 +1004,12 @@ async function ingestWsTrade(targetId: number, buy: any, rawTx: any) {
         : new Date().toISOString();
       await saveBlockAnalysis(buy.slot, buy.mint, buy.signature, blockTime, analyzeResult);
 
-      // 识别第一狙击者
-      const sniper = analyzeResult.buyers.find((b) => b.mark === 'first_sniper');
-      if (sniper) {
-        await query(
-          `UPDATE target_trades
-           SET first_sniper = $1, first_sniper_buy_sol = $2,
-               first_sniper_tip_sol = $3, first_sniper_prio_lamports = $4,
-               first_sniper_signature = $5,
-               first_sniper_offset_pos = $7,
-               first_sniper_offset_ms = $8
-           WHERE signature = $6`,
-          [
-            sniper.address,
-            sniper.buySol,
-            sniper.tipSol,
-            sniper.prioLamports,
-            sniper.signature,
-            buy.signature,
-            sniper.offsetPos,
-            sniper.offsetMs,
-          ],
-        );
+      // 识别第一狙击者 —— 走公共函数（详见 first-sniper.ts: applyFirstSniperToTarget）
+      // 不在这里直接拼 SQL，三处共用一份逻辑才能保证 target_trades 和 block_buyers 不漂移。
+      try {
+        await applyFirstSniperToTarget(buy.signature, analyzeResult);
+      } catch (sniperErr) {
+        console.warn('[ws-monitor] applyFirstSniperToTarget failed', sniperErr);
       }
 
       // 3) 池子扫描

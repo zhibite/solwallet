@@ -33,6 +33,10 @@ interface Target {
     slot: number;
     mint: string;
     block_time: string;
+    /** 狙击者那笔的 PnL（=「如果跟单这个狙击者能赚多少」） */
+    pnl_sol: string | null;
+    pnl_status: string | null;
+    pnl_sold_ratio: string | null;
   } | null;
   decision?: {
     worth_score: number | null;
@@ -62,11 +66,22 @@ interface Stats {
   last_tx_at?: number;
 }
 
+interface WsStatus {
+  running: boolean;
+  connected: boolean;
+  lastConnectedAt: string | null;
+  reconnectAttempts: number;
+  subscribedTargetsCount: number;
+  subscriptionsCount: number;
+  akbotRetryQueueSize: number;
+}
+
 const short = (addr: string) => `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 
 export default function MonitorList() {
   const [targets, setTargets] = useState<Target[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
+  const [wsStatus, setWsStatus] = useState<WsStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'paused'>('all');
@@ -79,12 +94,14 @@ export default function MonitorList() {
     if (isSilent) setRefreshing(true);
     else setLoading(true);
     try {
-      const [tRes, sRes] = await Promise.all([
+      const [tRes, sRes, wsRes] = await Promise.all([
         fetch('/api/targets').then((r) => r.json()),
         fetch('/api/stats').then((r) => r.json()),
+        fetch('/api/ws-monitor/status').then((r) => r.json()).catch(() => null),
       ]);
       if (tRes.ok) setTargets(tRes.data);
       if (sRes.ok) setStats(sRes.data);
+      if (wsRes?.success) setWsStatus(wsRes.data);
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -215,9 +232,14 @@ export default function MonitorList() {
     if (!ok) return;
     setBusy('clearAll');
     try {
-      const res = await fetch('/api/targets/clear-all', { method: 'POST' });
+      const res = await fetch('/api/targets/clear-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: true }),
+      });
       const json = await res.json();
       if (json.ok) {
+        await load(false);
         await alert({
           title: '已清空',
           description: `共删除 ${json.deleted.trades} 条交易、${json.deleted.analyses} 条分析`,
@@ -226,7 +248,6 @@ export default function MonitorList() {
       } else {
         await alert({ title: '清空失败', description: json.error, variant: 'danger' });
       }
-      await load(false);
     } finally {
       setBusy(null);
     }
@@ -284,12 +305,32 @@ export default function MonitorList() {
         </div>
       )}
 
+      {/* WebSocket 实时连接状态 */}
+      <WsStatusBar wsStatus={wsStatus} />
+
       {/* 添加目标 + 全局操作 */}
       <AddTargetForm onAdd={handleAdd} />
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2 text-sm">
           <span className="font-medium text-gray-800 dark:text-white/90">监控列表</span>
           <span className="text-xs text-gray-500 dark:text-gray-400">共 {filtered.length} 个</span>
+          {/* WebSocket 状态（复用 WsStatusBar 的状态解析逻辑） */}
+          {wsStatus && (() => {
+            const isConnected = wsStatus.running && wsStatus.connected;
+            const isReconnecting = wsStatus.running && !wsStatus.connected && wsStatus.reconnectAttempts > 0;
+            const dotColor = isConnected ? 'bg-green-500' : isReconnecting ? 'bg-yellow-400' : 'bg-gray-400';
+            const label = isConnected ? 'WS 已连接' : isReconnecting ? `WS 重连 ${wsStatus.reconnectAttempts}/10` : 'WS 断开';
+            const subLabel = isConnected
+              ? `${wsStatus.subscriptionsCount}订阅·${wsStatus.subscribedTargetsCount}目标`
+              : '';
+            return (
+              <>
+                <span className={`inline-block w-2 h-2 rounded-full ${dotColor} ${isReconnecting ? 'animate-pulse' : ''}`} />
+                <span className="text-xs font-medium text-gray-700 dark:text-gray-200">{label}</span>
+                {subLabel && <span className="text-xs text-gray-400 dark:text-gray-500">{subLabel}</span>}
+              </>
+            );
+          })()}
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -386,6 +427,44 @@ export default function MonitorList() {
           </table>
         </div>
       </div>
+    </div>
+  );
+}
+
+function WsStatusBar({ wsStatus }: { wsStatus: WsStatus | null }) {
+  if (!wsStatus) return null;
+
+  const isConnected = wsStatus.running && wsStatus.connected;
+  const isReconnecting = wsStatus.running && !wsStatus.connected && wsStatus.reconnectAttempts > 0;
+  const isStopped = !wsStatus.running;
+
+  const dotColor = isConnected
+    ? 'bg-green-500'
+    : isReconnecting
+    ? 'bg-yellow-400'
+    : 'bg-gray-400';
+
+  const label = isConnected
+    ? 'WebSocket 已连接'
+    : isReconnecting
+    ? `WebSocket 重连中 (${wsStatus.reconnectAttempts}/10)`
+    : 'WebSocket 已断开';
+
+  const subLabel = isConnected
+    ? `${wsStatus.subscriptionsCount} 个订阅 · ${wsStatus.subscribedTargetsCount} 个目标`
+    : isReconnecting
+    ? `最近连接 ${wsStatus.lastConnectedAt ? new Date(wsStatus.lastConnectedAt).toLocaleTimeString('zh-CN', { hour12: false }) : '-'}`
+    : wsStatus.lastConnectedAt
+    ? `断开于 ${new Date(wsStatus.lastConnectedAt).toLocaleTimeString('zh-CN', { hour12: false })}`
+    : '';
+
+  return (
+    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-50 dark:bg-zinc-800 border border-gray-200 dark:border-gray-700">
+      <span className={`inline-block w-2.5 h-2.5 rounded-full ${dotColor} ${isReconnecting ? 'animate-pulse' : ''}`} />
+      <span className="text-xs font-medium text-gray-700 dark:text-gray-200">{label}</span>
+      {subLabel && (
+        <span className="text-xs text-gray-400 dark:text-gray-500 ml-1">{subLabel}</span>
+      )}
     </div>
   );
 }

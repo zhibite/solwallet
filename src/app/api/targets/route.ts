@@ -60,13 +60,29 @@ export async function GET(req: NextRequest) {
              s.mint                    AS last_sniper_mint,
              s.block_time              AS last_sniper_block_time,
              s.first_sniper_tip_source AS last_sniper_tip_source,
-             s.pnl_sol                 AS last_sniper_pnl_sol
+             -- 跟单收益：target_trades.pnl_sol 是孤儿字段（无写入路径），
+             -- 改读狙击者那笔 block_buyers.pnl_sol（=「如果跟单这个狙击者能赚多少」）
+             s.sniper_pnl_sol          AS last_sniper_pnl_sol,
+             s.sniper_pnl_status       AS last_sniper_pnl_status,
+             s.sniper_pnl_sold_ratio   AS last_sniper_pnl_sold_ratio,
+             -- 0020: 未实现 PnL（浮盈），open/partial 行才有意义
+             s.sniper_unrealized_sol     AS last_sniper_unrealized_sol,
+             s.sniper_total_pnl_sol      AS last_sniper_total_pnl_sol,
+             s.sniper_current_price_sol  AS last_sniper_current_price_sol,
+             s.sniper_price_updated_at   AS last_sniper_price_updated_at
       FROM monitored_targets mt
       LEFT JOIN LATERAL (
         SELECT t.first_sniper, t.first_sniper_signature, t.first_sniper_offset_pos,
                t.first_sniper_offset_ms, t.first_sniper_tip_sol, t.first_sniper_prio_lamports,
-               t.first_sniper_buy_sol, t.slot, t.mint, t.block_time, t.pnl_sol,
-               bb.tip_source AS first_sniper_tip_source
+               t.first_sniper_buy_sol, t.slot, t.mint, t.block_time,
+               bb.tip_source AS first_sniper_tip_source,
+               bb.pnl_sol AS sniper_pnl_sol,
+               bb.pnl_status AS sniper_pnl_status,
+               bb.pnl_sold_ratio AS sniper_pnl_sold_ratio,
+               bb.unrealized_sol AS sniper_unrealized_sol,
+               bb.total_pnl_sol AS sniper_total_pnl_sol,
+               bb.current_price_sol AS sniper_current_price_sol,
+               bb.price_updated_at AS sniper_price_updated_at
         FROM target_trades t
         LEFT JOIN block_buyers bb ON bb.signature = t.first_sniper_signature
         WHERE t.target_id = mt.id AND t.first_sniper IS NOT NULL
@@ -102,6 +118,13 @@ export async function GET(req: NextRequest) {
           block_time: last_sniper_block_time,
           tip_source: last_sniper_tip_source,
           pnl_sol: last_sniper_pnl_sol,
+          pnl_status: r.last_sniper_pnl_status,
+          pnl_sold_ratio: r.last_sniper_pnl_sold_ratio,
+          // 0020: 未实现 PnL
+          unrealized_sol: r.last_sniper_unrealized_sol,
+          total_pnl_sol: r.last_sniper_total_pnl_sol,
+          current_price_sol: r.last_sniper_current_price_sol,
+          price_updated_at: r.last_sniper_price_updated_at,
         },
       };
     });

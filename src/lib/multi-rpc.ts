@@ -793,8 +793,20 @@ export class MultiFreeRpc {
 }
 
 let _instance: MultiFreeRpc | null = null;
+let _lastUrls: string[] = [];
 
+/**
+ * 从环境变量读取 RPC 端点列表。
+ *
+ * 优先读 SOLANA_RPCS（逗号分隔的单个字符串），再读编号的 SOLANA_RPC_1/2/3...
+ * 只有两者都没有时才 fallback 到 defaultEndpoints（防止旧配置丢失）。
+ */
 function loadRpcEndpoints(): string[] {
+  // 1. SOLANA_RPCS（逗号分隔字符串，与 solana-rpc.ts 的 HELIUS_RPCS 保持一致）
+  const commaList = (process.env.SOLANA_RPCS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (commaList.length > 0) return commaList;
+
+  // 2. 编号格式 SOLANA_RPC_1, SOLANA_RPC_2, ...（兼容旧配置）
   const urls: string[] = [];
   for (let i = 1; ; i++) {
     const val = process.env[`SOLANA_RPC_${i}`];
@@ -804,10 +816,18 @@ function loadRpcEndpoints(): string[] {
   return urls.length > 0 ? urls : MultiFreeRpc.defaultEndpoints();
 }
 
+/**
+ * 获取 MultiFreeRpc 单例。
+ *
+ * 真正的单例：同一进程内只创建一次，端点列表变化时才重建。
+ * 不再每次调用都 new，否则每个实例都会启动独立的 setInterval 健康检查定时器，
+ * 多个定时器并发跑会耗尽事件循环，导致脚本主循环被阻塞。
+ */
 export function getMultiRpc(): MultiFreeRpc {
-  if (!_instance) {
-    const urls = loadRpcEndpoints();
+  const urls = loadRpcEndpoints();
+  if (!_instance || JSON.stringify(urls) !== JSON.stringify(_lastUrls)) {
     _instance = new MultiFreeRpc(urls);
+    _lastUrls = urls;
   }
   return _instance;
 }

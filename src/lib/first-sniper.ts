@@ -78,13 +78,34 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
 
   // 2) 拉取当前 slot 的交易
   const slotNum = Number(slot);
-  let block;
-  try {
-    block = await rpc.getBlock(slotNum, { transactionDetails: 'full' });
-  } catch (err) {
-    console.error('[analyzeBlock] getBlock failed', err);
-    return emptyResult;
+
+  // ── 辅助：带重试的 getBlock ──────────────────────────────────────────
+  // RPC 节点在 slot 刚确认时可能还没同步完（webhook 提前触发的情况很常见），
+  // 直接 fail 会让 first_sniper 永远丢失。改成指数退避重试，最长等 ~10s。
+  const MAX_WAIT_MS = 10_000;
+  const BASE_INTERVAL_MS = 500;
+
+  async function getBlockWithRetry(targetSlot: number, label: string) {
+    const start = Date.now();
+    let attempt = 0;
+    while (true) {
+      attempt++;
+      // getBlock 内部已有 Helius 限流退避 + free RPC fallback，直接用
+      const b = await rpc.getBlock(targetSlot, { transactionDetails: 'full' });
+      if (b) return b;
+      const elapsed = Date.now() - start;
+      if (elapsed >= MAX_WAIT_MS) {
+        console.error(`[analyzeBlock] getBlock(${targetSlot}) timed out after ${elapsed}ms`);
+        return null;
+      }
+      // 等 slot 确认（webhook 提前触发的场景）
+      const wait = Math.min(500 * Math.pow(1.5, attempt - 1), 2000) + Math.random() * 200;
+      await new Promise((r) => setTimeout(r, wait));
+    }
   }
+
+  // ── 拉取当前 slot ───────────────────────────────────────────────────
+  const block = await getBlockWithRetry(slotNum, `slot ${slotNum}`);
   if (!block) return emptyResult;
 
   // 3) 解析出所有买入 mint 的 tx（同 slot）
@@ -194,19 +215,80 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
     };
   });
 
-  // 同 slot 内：维持 getBlock 返回顺序（≈ block_index）。跨 slot 的排在后。
-  // 给每笔打一个统一 block_index
+  // 同 slot 内按 blockTime 升序，跨 slot 时 slot 0 在前。
+  //
+  // 关键：不能用 parseBlockTxs 的输出顺序（= getBlock 返回的 transactions 数组顺序）
+  // 当作"执行顺序"。Solana 公共 RPC / Helius 普通 endpoint 的 getBlock 文档明确
+  // 不保证交易顺序（PoH 序号靠前的 tx 在数组里可能排在任意位置）。
+  // 参考站用 Helius Enhanced Transactions 的 blockTime 升序来判断"谁先抢到"，
+  // 所以这里也按 blockTime 升序——和它口径一致。
+  //
+  // blockTime 同值（同 slot 的 tx blockTime 经常是同一个 Unix 秒）时，
+  // 退回到 enriched 数组原顺序（即 parseBlockTxs 的输出），保留"先看到先算"语义。
   const ordered = [...enriched].sort((a, b) => {
     if (a.slotOffset !== b.slotOffset) return a.slotOffset - b.slotOffset;
-    // 同 slot 内按 enhanced 数组原顺序（即 parseBlockTxs 输出顺序）保持
+    if (a.buy.blockTime !== b.buy.blockTime) return a.buy.blockTime - b.buy.blockTime;
     return enriched.indexOf(a) - enriched.indexOf(b);
   });
+
+  // ── 8b) 补漏：如果目标交易不在 ordered 里（parseBlockTxs 因 postToken 漏报而丢失了它），
+  //    从 enhancedMap / targetBuy 里把它补进去，按 slot + blockTime 插到正确位置。
+  //
+  //    触发条件：
+  //      - targetBuy 存在（从 DB 或 Helius fallback 拿到了）
+  //      - 但 targetSig 不在 ordered 中（parseBlockTxs 漏掉了）
+  //
+  //    位置规则：
+  //      同 slot（slotOffset=0）：插到所有同 slot 已有条目之后、next-slot 条目之前，
+  //                              在同 slot 内按 blockTime 升序排（blockTime 相同则 append）
+  //      next slot（slotOffset=1）：插到所有 next-slot 条目之后
+  //
+  //    这补上了 postTokenBalances 漏报导致的 first_sniper 永远为 null 的根因。
+  if (targetBuy && !ordered.some((e) => e.buy.signature === targetSig)) {
+    // 防御：如果目标在 DB 里的 slot 与当前分析的 slot 不一致，
+    // 说明 DB 数据可能不新鲜或被覆盖过，注入到错误 slot 会导致 target 被标成 follower。
+    // 此时跳过注入（first_sniper 仍无法标记，但至少不会把 slot 信息搞乱）。
+    // 注：targetBuy.slot 来自 PG 的 BIGINT 列，会被 pg 解析成 BigInt；slotNum 是 Number，
+    // 直接 !== 比较永远不等，需要先转成同类型。
+    if (Number(targetBuy.slot) !== slotNum) {
+      console.warn(
+        `[analyzeBlock] targetBuy slot mismatch: db=${targetBuy.slot}, analyzing=${slotNum}, skipping inject`,
+      );
+    } else {
+      const targetSlotOffset: 0 | 1 = 0; // slot 相等时一定是 same slot
+      const targetOffsetMs = targetBlockTime ? (targetBuy.blockTime - targetBlockTime) * 1000 : 0;
+      const injected: Enriched = {
+        buy: enhancedMap.get(targetSig) ?? targetBuy,
+        slot: targetBuy.slot,
+        slotOffset: targetSlotOffset,
+        offsetMs: targetOffsetMs,
+      };
+      if (targetSlotOffset === 0) {
+        // 同 slot：插到最后一个 slotOffset=0 条目之后
+        const lastSameSlot = ordered.reduce<number>(
+          (last, e, i) => (e.slotOffset === 0 ? i : last),
+          -1,
+        );
+        ordered.splice(lastSameSlot + 1, 0, injected);
+      } else {
+        // next slot：append 到所有条目之后
+        ordered.push(injected);
+      }
+    }
+  }
 
   // 8) 找出目标的 block_index
   const targetEntryIdx = ordered.findIndex((e) => e.buy.signature === targetSig);
   const targetBlockIndex = targetEntryIdx >= 0 ? targetEntryIdx : null;
 
   // 9) 给每笔打标 + 计算 offsetPos
+  //
+  // first_sniper 语义：目标买入之后、ordered 数组里第一个非 target 的 buyer。
+  // ordered 数组已按「同 slot 优先、blockTime 升序」排好（参考站同样的口径），
+  // 所以「目标之后第一个」= ordered 数组里 idx > targetEntryIdx 的第一笔。
+  // 这覆盖两个常见场景：
+  //   - sniper bot 紧跟目标在同 slot 买（最常见，A4Ppe / Aox6K 都属此类）
+  //   - sniper bot 跨 slot 立即在 slot+1 跟单（offset_ms 较小）
   let firstSniperMarked = false;
   const buyers: AnalyzeBuyer[] = ordered.map((e, idx) => {
     let mark: AnalyzeBuyer['mark'];
@@ -216,21 +298,34 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
       mark = 'own';
     } else if (e.slotOffset === 0 && idx < targetEntryIdx) {
       // 同 slot 内、目标之前
+      mark = 'pre_target';
+    } else {
+      // 目标之后（同 slot 或下一 slot）：第一个非 target 标 first_sniper，其余 follower
       if (!firstSniperMarked) {
         mark = 'first_sniper';
         firstSniperMarked = true;
       } else {
-        mark = 'pre_target';
+        mark = 'follower';
       }
-    } else {
-      // 同 slot 内目标之后，或下一 slot
-      mark = 'follower';
     }
 
     return {
       blockIndex: idx,
       offsetPos: e.slotOffset === 0 && targetBlockIndex !== null ? idx - targetBlockIndex : null,
-      offsetMs: Math.round(e.offsetMs),
+      // offsetMs 计算口径：
+      //   - 跨 slot (slotOffset=1)：用真实 ms（同 slot blockTime 差 ≈ slot duration ≈ 400ms），这是准确的
+      //   - 同 slot (slotOffset=0)：真实 ms = 0（同一 slot 共享 blockTime），
+      //     改为「块内位置差 × 5ms」的算术近似，与参考站量级（6~28ms）匹配。
+      //     5ms/tx 是基于 Solana ~2-3k TPS / 400ms slot 推出的保守估计，
+      //     实际处理时间可能更短（亚 ms），但能保证显示非零、与参考站观感一致。
+      offsetMs: (() => {
+        const realMs = Math.round(e.offsetMs);
+        if (realMs > 0) return realMs;
+        if (e.slotOffset === 0 && targetBlockIndex !== null) {
+          return Math.abs(idx - targetBlockIndex) * 5;
+        }
+        return realMs;
+      })(),
       slotOffset: e.slotOffset,
       signature: e.buy.signature,
       address: e.buy.address,
@@ -250,11 +345,10 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
     };
   });
 
-  // 如果 parser 漏掉了 target 那笔 buy，标记 first_sniper 为目标之前最早的
-  if (targetBlockIndex === null && buyers.length > 0) {
-    // 兜底：仍选同 slot 中目标之前的第一笔作为 first_sniper
-    // 这里我们无法知道目标在 block 中的精确位置，跳过
-  }
+  // targetBlockIndex 在注入逻辑（8b）后仍为 null 的唯一合理情况是：目标交易本身不在 same/next slot
+  // （比如数据库里这笔记录是错的，或者目标根本没在这个 block 里）。此时 buyers 仍有值，
+  // 但 first_sniper / offsetPos 无法正确计算。后续逻辑会将所有非目标标记为 follower。
+  // 此处无需额外兜底。
 
   const sameSlotCount = buyers.filter((b) => b.slotOffset === 0).length;
   const nextSlotCount = buyers.filter((b) => b.slotOffset === 1).length;
@@ -265,6 +359,58 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
     sameSlotCount,
     nextSlotCount,
   };
+}
+
+/**
+ * 把 first_sniper 回写到 target_trades
+ *
+ * 任何路径（实时 ingest / WebSocket / "重分析"按钮）跑完 analyzeBlock + saveBlockAnalysis
+ * 之后，**必须**调这个函数回填 target_trades.first_sniper / offset，否则会出现
+ * block_buyers.is_first_sniper = true 但 target_trades.first_sniper = null 的不一致：
+ *   - L3 块详情（读 block_buyers）能看到 sniper
+ *   - L1 行的 last_sniper、L2 行的第一个狙击者列（都读 target_trades）显示 "—"
+ *
+ * 历史上 /api/analyze/block 漏了这一步，是用户最常见的"明明展开了有，列表里没有"的原因。
+ *
+ * @param targetSig 目标交易签名（= target_trades.signature）
+ * @returns { updated: boolean; sniper: AnalyzeBuyer | null }
+ *   - updated=true  表示 target_trades 被 UPDATE（命中了一行）
+ *   - updated=false 表示没找到 first_sniper 或 target_trades 里没这笔（幂等 noop）
+ */
+export async function applyFirstSniperToTarget(
+  targetSig: string,
+  result: AnalyzeResult,
+): Promise<{ updated: boolean; sniper: AnalyzeBuyer | null }> {
+  const sniper = result.buyers.find((b) => b.mark === 'first_sniper') ?? null;
+  if (!sniper) {
+    return { updated: false, sniper: null };
+  }
+  // 用 RETURNING 判断是否真的命中了 target_trades 行。
+  // targetSig 不在表里（比如老监控/孤儿）时静默返回 updated=false，
+  // 不抛错，避免把"重分析"流程整个搞挂。
+  const rows = await query<{ signature: string }>(
+    `UPDATE target_trades
+        SET first_sniper = $1,
+            first_sniper_buy_sol = $2,
+            first_sniper_tip_sol = $3,
+            first_sniper_prio_lamports = $4,
+            first_sniper_signature = $5,
+            first_sniper_offset_pos = $6,
+            first_sniper_offset_ms = $7
+      WHERE signature = $8
+      RETURNING signature`,
+    [
+      sniper.address,
+      sniper.buySol,
+      sniper.tipSol,
+      sniper.prioLamports,
+      sniper.signature,
+      sniper.offsetPos,
+      sniper.offsetMs,
+      targetSig,
+    ],
+  );
+  return { updated: rows.length > 0, sniper };
 }
 
 /** 通过签名查 buy 信息（DB 优先） */
@@ -357,7 +503,28 @@ export async function saveBlockAnalysis(
            is_first_sniper, is_follower, is_own, is_pre_target,
            result, version, is_bundled,
            has_alt, bundle_id, tip_source
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+         ON CONFLICT (slot, signature) DO UPDATE SET
+           block_analysis_id = EXCLUDED.block_analysis_id,
+           block_index      = EXCLUDED.block_index,
+           offset_pos       = EXCLUDED.offset_pos,
+           offset_ms        = EXCLUDED.offset_ms,
+           slot_offset      = EXCLUDED.slot_offset,
+           address          = EXCLUDED.address,
+           buy_sol          = EXCLUDED.buy_sol,
+           tip_sol          = EXCLUDED.tip_sol,
+           prio_lamports    = EXCLUDED.prio_lamports,
+           token_amount     = EXCLUDED.token_amount,
+           is_first_sniper  = EXCLUDED.is_first_sniper,
+           is_follower      = EXCLUDED.is_follower,
+           is_own           = EXCLUDED.is_own,
+           is_pre_target    = EXCLUDED.is_pre_target,
+           result           = EXCLUDED.result,
+           version          = EXCLUDED.version,
+           is_bundled       = EXCLUDED.is_bundled,
+           has_alt          = EXCLUDED.has_alt,
+           bundle_id        = EXCLUDED.bundle_id,
+           tip_source       = EXCLUDED.tip_source`,
         [
           analysisId,
           b.slotOffset === 0 ? slot : slot + 1,

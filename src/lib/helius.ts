@@ -29,6 +29,17 @@ import type { HeliusEnhancedTx } from './types';
 import { solanaTxToHeliusEnhanced } from './parser';
 import { getMultiRpc } from './multi-rpc';
 
+/** fallback 专用：独立创建免费端点轮询，不走 getMultiRpc()（后者现在走 SOLANA_RPCS = Helius） */
+let _fallbackRpc: ReturnType<typeof getMultiRpc> | null = null;
+function getFallbackRpc() {
+  if (!_fallbackRpc) {
+    _fallbackRpc = new (require('./multi-rpc').MultiFreeRpc)(
+      (require('./multi-rpc').MultiFreeRpc as any).defaultEndpoints(),
+    );
+  }
+  return _fallbackRpc;
+}
+
 // ============================================================================
 // Parsed Events API 类型定义（Helius 新版解析端点，10 credits/request）
 // ============================================================================
@@ -323,9 +334,13 @@ export class HeliusClient {
       }
       // 否则静默进入 fallback
     }
-    // 2) 公共 RPC fallback
+    // 2) 免费 RPC fallback（独立端点池，与主 SOLANA_RPCS 隔离）
     try {
-      const tx = await getMultiRpc().getTransaction(signature);
+      // 加 10s 超时，防止免费端点挂住把 analyzeBlock 卡死
+      const tx = await Promise.race([
+        getFallbackRpc().getTransaction(signature),
+        new Promise<null>((_, reject) => setTimeout(() => reject(new Error('fallback timeout')), 10_000)),
+      ]);
       if (!tx) return null;
       const adapted = solanaTxToHeliusEnhanced(tx);
       if (adapted) {

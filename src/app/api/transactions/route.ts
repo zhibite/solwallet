@@ -53,6 +53,19 @@ export async function GET(req: NextRequest) {
            b_first.signature AS first_sniper_buyer_signature,
            b_first.offset_ms AS first_sniper_offset_ms,
            b_first.tip_source AS first_sniper_tip_source,
+           -- 跟单收益：监控列表展示的是「如果跟单这个狙击者能赚多少」。
+           -- 数据源是狙击者那笔 block_buyers.pnl_sol（monitor.ts 在 saveBlockAnalysis
+           -- 之后 fire-and-forget 调 computeBulkBuyerPnL 写入；历史 backlog 由
+           -- scripts/backfill-all-pending-pnl.ts 补齐），
+           -- target_trades.pnl_sol 字段无写入路径，UI 不要直接读它。
+           b_first.pnl_sol::text AS sniper_pnl_sol,
+           b_first.pnl_status AS sniper_pnl_status,
+           b_first.pnl_sold_ratio::text AS sniper_pnl_sold_ratio,
+           -- 0020: 未实现 PnL（浮盈）
+           b_first.unrealized_sol::text AS sniper_unrealized_sol,
+           b_first.total_pnl_sol::text AS sniper_total_pnl_sol,
+           b_first.current_price_sol::text AS sniper_current_price_sol,
+           b_first.price_updated_at AS sniper_price_updated_at,
            b_own.block_index AS my_block_index,
            b_own.tip_sol::text AS my_tip_sol,
            b_own.prio_lamports AS my_prio_lamports,

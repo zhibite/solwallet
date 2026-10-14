@@ -34,8 +34,16 @@ export async function POST(req: NextRequest) {
       // 3) 清 target_trades
       const trades = await client.query('DELETE FROM target_trades');
 
-      // 4) 重置所有 record_count
-      await client.query('UPDATE monitored_targets SET record_count = 0');
+      // 4) 重置 record_count + last_buy_at = NOW()。
+      //    必须改 last_buy_at：clear-all 后 DB 已是空的，monitor 的 5 秒 fallback
+      //    轮询会调 getSignaturesForAddress(addr, 20)，对冷门目标这 20 笔可能跨 1-2 天。
+      //    设为 NOW() 后，monitor.ts 的 blockTime > lastBuyAtSec 过滤只接受
+      //    最近 5 秒的实时买入（5s 冗余防时钟边界 race），旧的 34h 历史 sig 全部被挡。
+      //    ws-monitor 是另一条独立路径，不受该过滤影响，新买入照常入库并把 last_buy_at
+      //    推到自己的 blockTime。
+      await client.query(
+        "UPDATE monitored_targets SET record_count = 0, last_buy_at = NOW()",
+      );
 
       return { trades: trades.rowCount ?? 0, analyses };
     });

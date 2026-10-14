@@ -14,7 +14,7 @@ import { query, queryOne, withTransaction } from './db';
 import { getHelius, isHeliusConfigured, parsedEventItemToEnhanced, type ParsedEventItem } from './helius';
 import { getMultiRpc } from './multi-rpc';
 import { parseHeliusTx } from './parser';
-import { saveBlockAnalysis } from './first-sniper';
+import { saveBlockAnalysis, computeBulkBuyerPnL, applyFirstSniperToTarget } from './first-sniper';
 import { quickAkbotCheck, isAkbotCircuitOpen } from './akbot';
 import { markAsAkbot } from './pool';
 
@@ -93,8 +93,20 @@ async function pollAllTargets() {
       const sigs = await rpc.getSignaturesForAddress(t.address, 20);
       if (sigs.length === 0) continue;
 
+      // 0) 过滤历史 sig：跳过 blockTime <= last_buy_at 的（防 clear-all/单清后 5 秒
+      //    轮询把该地址 1-2 天内的旧 20 笔签名当新数据倒灌入库）。
+      //    last_buy_at 由 monitor 入 buy 时更新，clear-all/单清时重置为 NULL。
+      //    冗余 5 秒防同一秒内的边界 race。
+      const lastBuyAtSec = t.last_buy_at
+        ? Math.floor(new Date(t.last_buy_at).getTime() / 1000) - 5
+        : 0;
+      const freshSigs = lastBuyAtSec > 0
+        ? sigs.filter((s) => !s.blockTime || s.blockTime > lastBuyAtSec)
+        : sigs;
+      if (freshSigs.length === 0) continue;
+
       // 1) 过滤 s.err（RPC 已标记失败，没必要再去 Helius 解析一次）
-      const goodSigs = sigs.filter((s) => !s.err);
+      const goodSigs = freshSigs.filter((s) => !s.err);
       if (goodSigs.length === 0) continue;
 
       // 2) 一次 SELECT ANY 查重（替代原来的 per-sig SELECT，DB 调用量降到 1/N）
@@ -241,11 +253,27 @@ export async function ingestTargetTrade(targetId: number, buy: any, rawTx: any) 
     );
   }
 
-  // 1.5) 真实新增时 +1（webhook 重投 / polling 重复扫到同一个 sig 不会重复计数）
+  // 1.5) 真实新增时 +1 + 推进 last_buy_at（webhook 重投 / polling 重复扫到同一个 sig 不会重复计数）
+  //    关键：ON CONFLICT 时也必须推进 last_buy_at。
+  //    原因：ws 重连重放导致同一 sig 多次进入 ingestWsTrade；poll 因网络抖动也可能
+  //    两次 INSERT 同一 sig（一次 INSERT，一次 ON CONFLICT）。两种情况都是
+  //    was_inserted = false 但 last_buy_at 必须推进，否则 poll 的过滤会失效。
   if (inserted.was_inserted) {
+    const blockSec = buy.blockTime && buy.blockTime > 0
+      ? buy.blockTime
+      : Math.floor(Date.now() / 1000);
     await query(
-      'UPDATE monitored_targets SET record_count = record_count + 1 WHERE id = $1',
-      [targetId],
+      'UPDATE monitored_targets SET record_count = record_count + 1, last_buy_at = to_timestamp($2) WHERE id = $1',
+      [targetId, blockSec],
+    );
+  } else {
+    // ON CONFLICT：只推进 last_buy_at，不重复计数
+    const blockSec = buy.blockTime && buy.blockTime > 0
+      ? buy.blockTime
+      : Math.floor(Date.now() / 1000);
+    await query(
+      'UPDATE monitored_targets SET last_buy_at = to_timestamp($2) WHERE id = $1',
+      [targetId, blockSec],
     );
   }
 
@@ -258,28 +286,39 @@ export async function ingestTargetTrade(targetId: number, buy: any, rawTx: any) 
         : new Date().toISOString();
       await saveBlockAnalysis(buy.slot, buy.mint, buy.signature, blockTime, analyzeResult);
 
-      // 识别第一个狙击者，更新 target_trades
-      const sniper = analyzeResult.buyers.find((b) => b.mark === 'first_sniper');
-      if (sniper) {
-        await query(
-          `UPDATE target_trades
-           SET first_sniper = $1, first_sniper_buy_sol = $2,
-               first_sniper_tip_sol = $3, first_sniper_prio_lamports = $4,
-               first_sniper_signature = $5,
-               first_sniper_offset_pos = $7,
-               first_sniper_offset_ms = $8
-           WHERE signature = $6`,
-          [
-            sniper.address,
-            sniper.buySol,
-            sniper.tipSol,
-            sniper.prioLamports,
-            sniper.signature,
-            buy.signature,
-            sniper.offsetPos,
-            sniper.offsetMs,
-          ],
-        );
+      // 立即算本 block 所有 buyer 的 PnL（不等独立 worker 兜底）：
+      //   - block_buyers 刚由 saveBlockAnalysis 写好，pnl_sol=NULL
+      //   - computeBulkBuyerPnL 的 filter 末位规则 !b.pnl_status 会兜底所有未算过的 buyer
+      //     （包括 follower / pre_target），不只是 first_sniper / own / target
+      //   - 真正 fire-and-forget：再包一层 setImmediate，不阻塞后面的 first_sniper 回填 / pool scan / akbot
+      //   - 历史 backlog（worker 卡在 456738961 之前的那批）由 scripts/backfill-block-pnl.ts 一次补齐
+      setImmediate(() => {
+        computeBulkBuyerPnL(buy.slot, buy.mint)
+          .then((r) => {
+            if (r.results.length === 0) return;
+            const closed = r.results.filter((x) => x.status === 'closed').length;
+            const open = r.results.filter((x) => x.status === 'open').length;
+            const errors = r.results.filter((x) => x.status === 'error').length;
+            console.log(
+              `[monitor] immediate pnl slot=${buy.slot} mint=${buy.mint.slice(0, 8)}... computed=${r.results.length} closed=${closed} open=${open} errors=${errors}`,
+            );
+          })
+          .catch((e) =>
+            console.warn(
+              `[monitor] immediate pnl failed slot=${buy.slot}:`,
+              (e as Error)?.message ?? e,
+            ),
+          );
+      });
+
+      // 识别第一个狙击者，更新 target_trades —— 公共函数在 first-sniper.ts
+      // 任何 analyze 路径都必须调它，否则会出现 block_buyers.is_first_sniper=true 但
+      // target_trades.first_sniper=null 的不一致（详见 applyFirstSniperToTarget 注释）。
+      try {
+        await applyFirstSniperToTarget(buy.signature, analyzeResult);
+      } catch (sniperErr) {
+        // 单独 try/catch：sniper 回填失败不应影响后面的 pool scan / akbot
+        console.warn('[monitor] applyFirstSniperToTarget failed', sniperErr);
       }
 
       // 3) 增量扫描池子（递归发现闭环）

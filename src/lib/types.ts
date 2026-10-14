@@ -10,14 +10,18 @@ export type TargetStatus = 'active' | 'paused';
  *
  * 收款地址 → 渠道的映射表：src/lib/parser.ts 的 SOLANA_TIP_SOURCE_MAP。
  *
+/**
  *   - 'jito'           : Jito（mainnet.block-engine.jito.wtf 的 8 个 tip account）
  *   - 'helius_sender'  : Helius Sender（多通路：Jito/Harmonic/Rakurai 走同一个 tip 账户池）
  *   - 'landx'          : LandX（landx.dev 的 10 个 tip account，前缀 LandX）
  *   - 'zero_slot'      : 0slot.trade 的 10 个 tip account
- *   - 'unknown'        : 付了 tip 但未匹配任何已知渠道（新通道 / 链上数据补）
+ *   - 'extended_tip'   : 通过启发式识别（feePayer 出去的最小非 self SOL 转账，< 30% buy_sol），
+ *                        但收款地址不在上面 4 通道里。新发现的 tip 服务（Astralane / rapidX /
+ *                        Jito TipRouter / 未知 tip pool）会落到这里。
+ *   - 'unknown'        : 已知表/启发式都判定是 tip，但渠道仍无法归类
  *   - null/undefined   : 该笔未付 tip（不是任何 tip 通道；普通 v0 tx / 纯 prio 通道）
  */
-export type TipSource = 'jito' | 'helius_sender' | 'landx' | 'zero_slot' | 'unknown';
+export type TipSource = 'jito' | 'helius_sender' | 'landx' | 'zero_slot' | 'extended_tip' | 'unknown';
 
 export interface MonitoredTarget {
   id: number;

@@ -6,6 +6,7 @@
  *  - 'helius_sender'  : 蓝色（helius 品牌色）
  *  - 'landx'          : 绿色（landx 品牌色）
  *  - 'zero_slot'      : 黄色（0slot 强调色）
+ *  - 'extended_tip'   : 青色（启发式识别的新通道；Astralane / rapidX / Jito 多档 等）
  *  - 'unknown'        : 灰色（未识别通道；可能是新通道 / 数据问题）
  *  - null             : 不渲染（不显示徽章）
  *
@@ -21,6 +22,7 @@ const COLORS: Record<TipSource, string> = {
   helius_sender: 'bg-blue-500/15 text-blue-700 dark:text-blue-400 ring-blue-500/30',
   landx: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 ring-emerald-500/30',
   zero_slot: 'bg-amber-500/15 text-amber-700 dark:text-amber-400 ring-amber-500/30',
+  extended_tip: 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-400 ring-cyan-500/30',
   unknown: 'bg-gray-500/15 text-gray-600 dark:text-gray-400 ring-gray-500/30',
 };
 
@@ -29,6 +31,7 @@ const LABELS: Record<TipSource, string> = {
   helius_sender: 'Helius Sender',
   landx: 'LandX',
   zero_slot: '0slot',
+  extended_tip: '扩展通道',
   unknown: '未知',
 };
 
@@ -37,6 +40,7 @@ const FULL_LABELS: Record<TipSource, string> = {
   helius_sender: 'Helius Sender tip',
   landx: 'LandX tip',
   zero_slot: '0slot tip',
+  extended_tip: '扩展 tip 通道（启发式识别；可能是 Astralane / rapidX / Jito 多档 等）',
   unknown: '未知 tip 通道',
 };
 
@@ -49,6 +53,7 @@ const SHORT_LABELS: Record<TipSource, string> = {
   helius_sender: 'Hel',
   landx: 'LndX',
   zero_slot: '0sl',
+  extended_tip: 'Ext',
   unknown: '?',
 };
 

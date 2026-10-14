@@ -29,6 +29,16 @@ interface Target {
     mint: string;
     block_time: string;
     pnl_sol?: string | null;
+    /** open=持仓中 / closed=已平仓 / partial=部分平仓 / buy_failed=买入失败（决定 UI 用三段式还是单段） */
+    pnl_status?: string | null;
+    /** 0020: 浮盈（未实现），open/partial 才有意义；closed 时 = 0 */
+    unrealized_sol?: string | null;
+    /** 0020: 总 PnL = pnl_sol(已实现) + unrealized_sol，UI 主显示值 */
+    total_pnl_sol?: string | null;
+    /** 0020: 当前价格 SOL 单位（拉不到为 null） */
+    current_price_sol?: string | null;
+    /** 0020: 价格刷新时间（> 60s 没刷 UI 标 ~ 表示可能过期） */
+    price_updated_at?: string | null;
   } | null;
 }
 
@@ -54,7 +64,16 @@ interface Trade {
   first_sniper_signature: string | null;
   first_sniper_offset_pos: number | null;
   first_sniper_offset_ms: number | null;
-  pnl_sol?: string | null;
+  /** 狙击者那笔买入的 PnL（=「如果跟单这个狙击者能赚多少」）。null = 还在算或没卖出。 */
+  sniper_pnl_sol?: string | null;
+  sniper_pnl_status?: string | null;
+  sniper_pnl_sold_ratio?: string | null;
+  // 0020: 三段式
+  sniper_unrealized_sol?: string | null;
+  sniper_total_pnl_sol?: string | null;
+  sniper_current_price_sol?: string | null;
+  sniper_price_updated_at?: string | null;
+  pnl_sol?: string | null;  // 兼容字段：仍保留，UI 优先用 sniper_pnl_sol
   status: string;
   first_sniper_slot?: number | null;
   first_sniper_buyer_signature?: string | null;
@@ -127,7 +146,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
     if (trades !== null) return true;
     setLoadingTrades(true);
     try {
-      const res = await fetch(`/api/transactions?target_id=${target.id}&limit=20&first_only=${firstOnly ? 1 : 0}`);
+      const res = await fetch(`/api/transactions?target_id=${target.id}&limit=30&first_only=${firstOnly ? 1 : 0}`);
       const json = await res.json();
       if (json.ok) {
         setTrades(json.data);
@@ -176,19 +195,37 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
         first_sniper: target.last_sniper.address,
         first_sniper_signature: target.last_sniper.signature,
         first_sniper_offset_pos: target.last_sniper.offset_pos,
+        first_sniper_offset_ms: target.last_sniper.offset_ms,
+        first_sniper_slot: target.last_sniper.slot,
         first_sniper_tip_sol: target.last_sniper.tip_sol,
         first_sniper_prio_lamports: target.last_sniper.prio_lamports,
         pnl_sol: target.last_sniper.pnl_sol,
+        // 0020: 浮盈 + 总 PnL 三段式
+        unrealized_sol: target.last_sniper.unrealized_sol ?? null,
+        total_pnl_sol: target.last_sniper.total_pnl_sol ?? null,
+        current_price_sol: target.last_sniper.current_price_sol ?? null,
+        price_updated_at: target.last_sniper.price_updated_at ?? null,
+        pnl_status: target.last_sniper.pnl_status ?? null,
         slot: target.last_sniper.slot,
         mint: target.last_sniper.mint,
         block_time: target.last_sniper.block_time,
       }
     : latest;
 
-  const sniperFailed = !!sniper && (!sniper.first_sniper || sniper.first_sniper_offset_pos === null);
-  const sniperOffset = sniper?.first_sniper_offset_pos !== null && sniper?.first_sniper_offset_pos !== undefined
-    ? Math.abs(sniper.first_sniper_offset_pos)
-    : 0;
+  const sniperFailed = !!sniper && (!sniper.first_sniper || sniper.first_sniper_offset_ms === null);
+  // 优先用 ms 差（与参考站一致 = 狙击者比目标晚多少毫秒买入）。
+  // 没记录 ms 时 fallback 到 offset_pos（块内位置差）以保持可见。
+  const sniperOffset = (() => {
+    // 顶层 last_sniper 字段直接叫 offset_ms
+    const lastMs = target.last_sniper?.offset_ms ?? null;
+    if (lastMs != null) return Math.abs(lastMs);
+    if (sniper?.first_sniper_offset_ms != null) return Math.abs(sniper.first_sniper_offset_ms);
+    if (sniper?.first_sniper_offset_pos != null) return Math.abs(sniper.first_sniper_offset_pos);
+    return 0;
+  })();
+  // 「下slot」小标签（参考网站口径）：
+  // 在我们这里，offset_pos 跨 slot 时存为 NULL —— 等价于参考站的 slot_delta=1
+  const sniperNextSlot = sniper?.first_sniper_offset_pos == null && !!sniper?.first_sniper;
 
   return (
     <>
@@ -275,14 +312,21 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
               <span className="font-mono text-gray-400">—</span>
             )}
             {sniper?.first_sniper && (
-              <span
-                className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold shrink-0 ${
-                  sniperFailed
-                    ? 'bg-red-500/15 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-500/30'
-                    : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/30'
-                }`}
-              >
-                {sniperFailed ? '失败' : '抢到'} +{sniperOffset}
+              <span className="inline-flex items-center gap-0.5 shrink-0">
+                <span
+                  className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                    sniperFailed
+                      ? 'bg-red-500/15 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-500/30'
+                      : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/30'
+                  }`}
+                >
+                  {sniperFailed ? '失败' : '抢到'} +{sniperOffset}
+                </span>
+                {sniperNextSlot && (
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-slate-100 dark:bg-zinc-600 text-gray-500 dark:text-gray-300 font-medium">
+                    下slot
+                  </span>
+                )}
               </span>
             )}
             {(latest?.next_slot_count ?? 0) > 0 && (
@@ -311,21 +355,67 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
           </span>
         </td>
 
-        {/* 收益（第4列） */}
+        {/* 收益（第4列）：三段式 = 已实现 + 浮盈 = 总 PnL */}
         <td className="px-3 py-3 text-right">
-          <span className={`text-xs font-mono font-semibold tabular-nums ${
-            sniper?.pnl_sol != null
-              ? parseFloat(sniper.pnl_sol) > 0
-                ? 'text-emerald-500'
-                : parseFloat(sniper.pnl_sol) < 0
-                  ? 'text-red-500'
-                  : 'text-gray-400'
-              : 'text-gray-400'
-          }`}>
-            {sniper?.pnl_sol != null
-              ? `${parseFloat(sniper.pnl_sol) >= 0 ? '+' : ''}${parseFloat(sniper.pnl_sol).toFixed(4)}`
-              : '—'}
-          </span>
+          {(() => {
+            // 三段式字段（sniper 只有 last_sniper 时才有这套，未连上 sniper 时退化到 trades 表）
+            const realized = (sniper as any)?.pnl_sol != null ? parseFloat((sniper as any).pnl_sol) : null;
+            const unreal = (sniper as any)?.unrealized_sol != null ? parseFloat((sniper as any).unrealized_sol) : null;
+            const total = (sniper as any)?.total_pnl_sol != null ? parseFloat((sniper as any).total_pnl_sol) : realized;
+            const status = ((sniper as any)?.pnl_status as string | undefined) ?? null;
+            const priceUpd = (sniper as any)?.price_updated_at as string | undefined;
+            // 价格 > 90s 没刷新：标 ~ 表示可能过期。
+            //   注意：price_updated_at 异常（'abc' 等）时 new Date(...).getTime() = NaN，
+            //   Date.now() - NaN = NaN，NaN > 90_000 = false ——会让 stale 误判为 false。
+            //   因此要显式 catch invalid date。
+            const priceUpdTs = priceUpd ? new Date(priceUpd).getTime() : NaN;
+            const stale = !priceUpd || !Number.isFinite(priceUpdTs) || Date.now() - priceUpdTs > 90_000;
+            const isOpen = status === 'open';
+            const isPartial = status === 'partial';
+            // 颜色的优先级按 total 决定（最贴近用户的真实判断）
+            const tone =
+              total != null
+                ? total > 0 ? 'text-emerald-500'
+                : total < 0 ? 'text-red-500'
+                : 'text-gray-400'
+                : 'text-gray-400';
+
+            if (total == null) {
+              return (
+                <span className="text-gray-400 text-xs font-mono" title="pnl 还在计算中">
+                  —
+                </span>
+              );
+            }
+
+            // closed 或 buy_failed：直接一个数字
+            if (!isOpen && !isPartial) {
+              return (
+                <span className={`text-xs font-mono font-semibold tabular-nums ${tone}`} title={`已实现收益（${status ?? 'closed'}）`}>
+                  {`${total >= 0 ? '+' : ''}${total.toFixed(4)}`}
+                </span>
+              );
+            }
+
+            // open / partial：三段式展示
+            return (
+              <div className="flex flex-col items-end leading-tight">
+                <span className={`text-xs font-mono font-semibold tabular-nums ${tone}`}>
+                  {`${total >= 0 ? '+' : ''}${total.toFixed(4)}`}
+                  {isOpen ? '*' : ''}
+                </span>
+                {(realized != null || unreal != null) && (
+                  <span
+                    className="text-[10px] font-mono tabular-nums text-gray-400 dark:text-gray-500"
+                    title={`已实现 ${realized?.toFixed(4) ?? '-'}，浮盈 ${unreal?.toFixed(4) ?? '-'}`}
+                  >
+                    {`实${realized != null ? (realized >= 0 ? '+' : '') + realized.toFixed(3) : '-'} + 浮${unreal != null ? (unreal >= 0 ? '+' : '') + unreal.toFixed(3) : '-'}`}
+                    {stale ? ' ~' : ''}
+                  </span>
+                )}
+              </div>
+            );
+          })()}
         </td>
 
         {/* 操作 */}
@@ -379,42 +469,45 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
       {/* ===== 第2层：买入交易列表 ===== */}
       {expanded && (
         <tr>
-          <td colSpan={12} className="bg-slate-50/70 dark:bg-zinc-700/20 px-6 py-4">
+          <td colSpan={12} className="px-6 py-5">
             {loadingTrades ? (
-              <div className="flex items-center gap-2 text-xs text-gray-400 dark:text-gray-500 py-4">
+              <div className="flex items-center gap-2 text-xs text-gray-400 dark:text-gray-500 py-6">
                 <span className="w-4 h-4 rounded-full border-2 border-current animate-spin" style={{ borderTopColor: 'transparent' }} />
-                加载中...
+                <span>加载中...</span>
               </div>
             ) : !trades || trades.length === 0 ? (
-              <div className="text-xs text-gray-400 dark:text-gray-500 py-4 italic">
+              <div className="text-xs text-gray-400 dark:text-gray-500 py-6 italic text-center">
                 暂无 buy 记录（阈值 {parseFloat(target.threshold_sol).toFixed(4)} SOL）
               </div>
             ) : (
-              <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
+              <div className="overflow-x-auto rounded-xl border border-gray-200/80 dark:border-gray-700/50 shadow-sm bg-white dark:bg-zinc-800">
                 <table className="w-full text-xs">
-                  <thead className="bg-gray-50 dark:bg-zinc-700/50 text-gray-500 dark:text-gray-400">
-                    <tr className="border-b border-gray-200 dark:border-gray-700">
+                  <thead>
+                    <tr className="bg-gradient-to-r from-slate-100 to-gray-50 dark:from-zinc-700 dark:to-zinc-700/80 text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
                       {/* 时间 / mint / slot / 买入SOL / 第一个狙击者 / 狙击tip / 狙击prio / 跟单收益 / 买家 / 我的排位 / 我的tip / 我的prio */}
-                      <th className="py-2 px-2 text-left font-medium">时间</th>
-                      <th className="py-2 px-2 text-left font-medium">mint</th>
-                      <th className="py-2 px-2 text-left font-medium">slot</th>
-                      <th className="py-2 px-2 text-right font-medium">买入SOL</th>
-                      <th className="py-2 px-2 text-left font-medium">第一个狙击者</th>
-                      <th className="py-2 px-2 text-right font-medium">tip</th>
-                      <th className="py-2 px-2 text-right font-medium">prio</th>
-                      <th className="py-2 px-2 text-right font-medium">跟单收益</th>
-                      <th className="py-2 px-2 text-right font-medium" title="同 slot + 下一 slot 买这个 token 的总笔数">买家</th>
-                      <th className="py-2 px-2 text-center font-medium" title="在所有跟这个目标的人里，我是第几个跟上的">我的排位</th>
-                      <th className="py-2 px-2 text-right font-medium" title="我的 tip">我的tip</th>
-                      <th className="py-2 px-2 text-right font-medium" title="我的 prio">我的prio</th>
+                      <th className="py-2.5 px-3 text-left font-semibold">时间</th>
+                      <th className="py-2.5 px-3 text-left font-semibold">mint</th>
+                      <th className="py-2.5 px-3 text-left font-semibold">slot</th>
+                      <th className="py-2.5 px-3 text-right font-semibold">买入SOL</th>
+                      <th className="py-2.5 px-3 text-left font-semibold">第一个狙击者</th>
+                      <th className="py-2.5 px-3 text-right font-semibold">tip</th>
+                      <th className="py-2.5 px-3 text-right font-semibold">prio</th>
+                      <th className="py-2.5 px-3 text-right font-semibold">跟单收益</th>
+                      <th className="py-2.5 px-3 text-right font-semibold" title="同 slot + 下一 slot 买这个 token 的总笔数">买家</th>
+                      <th className="py-2.5 px-3 text-center font-semibold" title="在所有跟这个目标的人里，我是第几个跟上的">我的排位</th>
+                      <th className="py-2.5 px-3 text-right font-semibold" title="我的 tip">我的tip</th>
+                      <th className="py-2.5 px-3 text-right font-semibold" title="我的 prio">我的prio</th>
                     </tr>
                   </thead>
                   <tbody>
                     {trades.map((t, i) => {
-                      const snFailed = !t.first_sniper || t.first_sniper_offset_pos === null;
-                      const snOffset = t.first_sniper_offset_pos != null
-                        ? Math.abs(t.first_sniper_offset_pos)
-                        : 0;
+                      const snFailed = !t.first_sniper || t.first_sniper_offset_ms === null;
+                      // 优先用 ms 差（与参考站一致）
+                      const snOffset = (() => {
+                        if (t.first_sniper_offset_ms != null) return Math.abs(t.first_sniper_offset_ms);
+                        if (t.first_sniper_offset_pos != null) return Math.abs(t.first_sniper_offset_pos);
+                        return 0;
+                      })();
                       const competitorCount = (t.same_slot_count ?? 0) + (t.next_slot_count ?? 0);
 
                       // 我的排位：my_block_index 相对于目标（first_sniper_slot / slot）计算
@@ -429,27 +522,27 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                         // ===== 第2层：交易行（可点击展开） =====
                         <tr
                           key={`trade-${t.id}`}
-                          className={`border-b border-gray-100 dark:border-gray-700/50 hover:bg-brand-50/40 dark:hover:bg-brand-500/10 cursor-pointer transition-colors ${
-                            i % 2 === 0 ? 'bg-white dark:bg-zinc-800' : 'bg-gray-50/60 dark:bg-zinc-800/60'
-                          } ${isThisTradeExpanded ? 'bg-blue-50/40 dark:bg-blue-500/10 ring-1 ring-blue-200 dark:ring-blue-500/30' : ''}`}
+                          className={`group border-b border-gray-100 dark:border-gray-700/50 hover:bg-brand-50/60 dark:hover:bg-brand-500/15 cursor-pointer transition-all duration-150 ${
+                            i % 2 === 0 ? 'bg-white dark:bg-zinc-800' : 'bg-gray-50/50 dark:bg-zinc-800/40'
+                          } ${isThisTradeExpanded ? 'bg-blue-50/50 dark:bg-blue-500/10 ring-1 ring-blue-200 dark:ring-blue-500/30 shadow-sm' : ''}`}
                           onClick={() => toggleTradeExpand(t.id)}
                         >
-                          <td className="py-1.5 px-2 font-mono text-gray-500 dark:text-gray-400 tabular-nums">{fmtTime(t.block_time)}</td>
-                          <td className="py-1.5 px-2">
-                            <div className="flex items-center gap-1">
+                          <td className="py-2 px-3 font-mono text-gray-500 dark:text-gray-400 tabular-nums">{fmtTime(t.block_time)}</td>
+                          <td className="py-2 px-3">
+                            <div className="flex items-center gap-1.5">
                               <AddressCopy address={t.mint} length={5} />
                               {isDevBuy && (
-                                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/30" title="dev 单：create 和 buy 在同一个 tx">
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/30" title="dev 单：create 和 buy 在同一个 tx">
                                   dev
                                 </span>
                               )}
                             </div>
                           </td>
-                          <td className="py-1.5 px-2 font-mono text-gray-400 dark:text-gray-500 tabular-nums">{t.slot}</td>
-                          <td className="py-1.5 px-2 text-right"><SolAmount value={t.buy_sol} /></td>
+                          <td className="py-2 px-3 font-mono text-gray-400 dark:text-gray-500 tabular-nums">{t.slot}</td>
+                          <td className="py-2 px-3 text-right"><SolAmount value={t.buy_sol} /></td>
 
                           {/* 第一个狙击者 */}
-                          <td className="py-1.5 px-2">
+                          <td className="py-2 px-3">
                             {t.first_sniper ? (
                               <div className="flex items-center gap-1.5">
                                 <AddressCopy address={t.first_sniper} length={4} />
@@ -462,45 +555,82 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                                 >
                                   {snFailed ? '失败' : '抢到'} +{snOffset}
                                 </span>
+                                {/* 下slot 小标签（参考网站口径：offset_pos 跨 slot 时为 null） */}
+                                {t.first_sniper_offset_pos == null && !snFailed && (
+                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-slate-100 dark:bg-zinc-600 text-gray-500 dark:text-gray-300 font-medium">
+                                    下slot
+                                  </span>
+                                )}
                               </div>
                             ) : <span className="text-gray-300 dark:text-gray-600">—</span>}
                           </td>
 
-                          <td className="py-1.5 px-2 text-right font-mono text-amber-600 dark:text-amber-400 tabular-nums">
+                          <td className="py-2 px-3 text-right font-mono text-amber-600 dark:text-amber-400 tabular-nums">
                             {t.first_sniper_tip_sol != null
                               ? Number(t.first_sniper_tip_sol).toFixed(6)
                               : <span className="text-gray-300 dark:text-gray-600">—</span>}
                           </td>
-                          <td className="py-1.5 px-2 text-right font-mono text-purple-600 dark:text-purple-400 tabular-nums">
+                          <td className="py-2 px-3 text-right font-mono text-purple-600 dark:text-purple-400 tabular-nums">
                             {t.first_sniper_prio_lamports != null
                               ? (Number(t.first_sniper_prio_lamports) / 1e9).toFixed(6)
                               : <span className="text-gray-300 dark:text-gray-600">—</span>}
                           </td>
-                          <td className="py-1.5 px-2 text-right font-mono tabular-nums">
-                            <span className={`${
-                              t.pnl_sol != null
-                                ? parseFloat(t.pnl_sol) > 0
-                                  ? 'text-emerald-500'
-                                  : parseFloat(t.pnl_sol) < 0
-                                    ? 'text-red-500'
-                                    : 'text-gray-400'
-                                : 'text-gray-400'
-                            }`}>
-                              {t.pnl_sol != null
-                                ? `${parseFloat(t.pnl_sol) >= 0 ? '+' : ''}${parseFloat(t.pnl_sol).toFixed(4)}`
-                                : '—'}
-                            </span>
-                          </td>
+                          {(() => {
+                            // 跟单收益：监控列表展示的是「如果跟单这个狙击者能赚多少」。
+                            // 优先读 sniper_pnl_sol（= b_first.pnl_sol，狙击者那笔的 PnL），
+                            // sniper_pnl_status='open' 时也显示数字（已实现部分），'—' 表示还没卖出。
+                            // 0020: 三段式 = 已实现 + 浮盈 = 总 PnL（狙击主行也是这套）。
+                            const realized = t.sniper_pnl_sol != null ? parseFloat(t.sniper_pnl_sol) : null;
+                            const unreal = t.sniper_unrealized_sol != null ? parseFloat(t.sniper_unrealized_sol) : null;
+                            const total = t.sniper_total_pnl_sol != null ? parseFloat(t.sniper_total_pnl_sol) : realized;
+                            const status = t.sniper_pnl_status;
+                            const isOpen = status === 'open';
+                            const isPartial = status === 'partial';
+                            const tone = total != null
+                              ? total > 0 ? 'text-emerald-500'
+                              : total < 0 ? 'text-red-500'
+                              : 'text-gray-400'
+                              : 'text-gray-400';
+
+                            if (total == null) {
+                              return (
+                                <td className="py-2 px-3 text-right font-mono text-gray-400 tabular-nums" title="pnl 还在计算中">—</td>
+                              );
+                            }
+
+                            if (!isOpen && !isPartial) {
+                              // closed / buy_failed：单段
+                              return (
+                                <td className="py-2 px-3 text-right font-mono tabular-nums" title="狙击者已实现收益">
+                                  <span className={tone}>
+                                    {`${total >= 0 ? '+' : ''}${total.toFixed(4)}`}
+                                  </span>
+                                </td>
+                              );
+                            }
+
+                            // open / partial：三段式（小屏用紧凑形式：总额 + 副行说明「实+浮」）
+                            return (
+                              <td className="py-2 px-3 text-right font-mono tabular-nums" title={`已实现 ${realized?.toFixed(4) ?? '-'}，浮盈 ${unreal?.toFixed(4) ?? '-'}`}>
+                                <div className="flex flex-col items-end leading-tight">
+                                  <span className={`${tone}`}>{`${total >= 0 ? '+' : ''}${total.toFixed(4)}${isOpen ? '*' : ''}`}</span>
+                                  <span className="text-[10px] text-gray-400 dark:text-gray-500">
+                                    {`实${realized != null ? (realized >= 0 ? '+' : '') + realized.toFixed(3) : '-'} + 浮${unreal != null ? (unreal >= 0 ? '+' : '') + unreal.toFixed(3) : '-'}`}
+                                  </span>
+                                </div>
+                              </td>
+                            );
+                          })()}
 
                           {/* 买家总数 */}
-                          <td className="py-1.5 px-2 text-right font-mono text-gray-400 dark:text-gray-500 tabular-nums">
+                          <td className="py-2 px-3 text-right font-mono text-gray-400 dark:text-gray-500 tabular-nums">
                             {competitorCount > 0
                               ? <span className="text-gray-600 dark:text-gray-300">{competitorCount}</span>
                               : <span className="text-gray-300 dark:text-gray-600">—</span>}
                           </td>
 
                           {/* 我的排位 */}
-                          <td className="py-1.5 px-2 text-center">
+                          <td className="py-2 px-3 text-center">
                             {myRank ? (
                               <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-500/15 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-500/30">
                                 {myRank}
@@ -511,14 +641,14 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                           </td>
 
                           {/* 我的 tip */}
-                          <td className="py-1.5 px-2 text-right font-mono text-amber-600 dark:text-amber-400 tabular-nums">
+                          <td className="py-2 px-3 text-right font-mono text-amber-600 dark:text-amber-400 tabular-nums">
                             {t.my_tip_sol != null
                               ? Number(t.my_tip_sol).toFixed(6)
                               : <span className="text-gray-300 dark:text-gray-600">—</span>}
                           </td>
 
                           {/* 我的 prio */}
-                          <td className="py-1.5 px-2 text-right font-mono text-purple-600 dark:text-purple-400 tabular-nums">
+                          <td className="py-2 px-3 text-right font-mono text-purple-600 dark:text-purple-400 tabular-nums">
                             {t.my_prio_lamports != null
                               ? (Number(t.my_prio_lamports) / 1e9).toFixed(6)
                               : <span className="text-gray-300 dark:text-gray-600">—</span>}
@@ -527,8 +657,8 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
 
                         // ===== 第3层：内嵌于第2层内部的 block 级买家分布（手风琴展开行） =====
                         isThisTradeExpanded && (
-                          <tr key={`detail-${t.id}`} className="bg-slate-100/60 dark:bg-zinc-700/20 border-b border-gray-200 dark:border-gray-700">
-                            <td colSpan={12} className="px-4 py-3">
+                          <tr key={`detail-${t.id}`} className="bg-gradient-to-r from-slate-50 to-blue-50/30 dark:from-zinc-700/30 dark:to-blue-500/10 border-b border-gray-200 dark:border-gray-700">
+                            <td colSpan={12} className="px-5 py-4">
                               <div className="flex items-center justify-between mb-2">
                                 <div className="flex items-center gap-2">
                                   <span className="w-1.5 h-1.5 rounded-full bg-brand-500" />

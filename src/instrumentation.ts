@@ -80,13 +80,17 @@ export async function register() {
       console.error('[instrumentation] akbot backfill worker failed to start', err);
     }
 
-    // PnL 计算 Worker（后台常驻任务，自动计算 block_buyers 的跟单收益）
+    // PnL 计算：跟随 monitor.ts 的 fire-and-forget 在 saveBlockAnalysis 后立即触发，
+    // 不再启动独立进程。原 src/lib/pnl-worker.ts 已删除 —— 独立 worker 挂掉后无法
+    // 自动恢复，且容易跟主进程失同步。历史 backlog 由 scripts/backfill-block-pnl.ts 一次补齐。
+
+    // WebSocket 实时监控（毫秒级延迟，相比轮询能抓到第一狙击者）
     try {
-      const { startPnlWorker } = await import('./lib/pnl-worker');
-      await startPnlWorker();
-      console.log('[instrumentation] pnl worker started');
+      const { startWsMonitor } = await import('./lib/ws-monitor');
+      await startWsMonitor();
+      console.log('[instrumentation] ws monitor started');
     } catch (err) {
-      console.error('[instrumentation] pnl worker failed to start', err);
+      console.error('[instrumentation] ws monitor failed to start', err);
     }
   }
 }

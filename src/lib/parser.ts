@@ -127,24 +127,47 @@ export function outboundTokenAmount(tx: HeliusEnhancedTx, mint: string, owner?: 
 /** 计算买入花费的 SOL：含 jito tip 与 ATA rent，**不含** tx fee（fee 单独走 buyFeeLamports）。
  *
  *  Helius 路径：nativeTransfers 是账户间转账列表，runtime 烧掉的 fee 不在里面，
- *  所以直接累加 feePayer 的 outgoing transfers 就是 buy + tip + rent。 */
+ *  所以直接累加 feePayer 的 outgoing transfers 就是 buy + tip + rent。
+ *
+ *  ⚠ Helius Sender 退款问题：
+ *    Helius Sender 会在 swap 执行前预付一笔 SOL 给 feePayer 钱包（用于支付 pool + sender_fee），
+ *    swap 执行完后 sender 再从钱包收回多余 SOL。这笔"回收"在 nativeTransfers 里表现为
+ *    sender → feePayer 的 IN 条目（如 HcboKjWs1 → 钱包 1.00148844 SOL）。
+ *    如果不加处理地累加所有 OUT，buySol 会虚高约 1 SOL（= refund amount）。
+ *    修正方法：从总流出中剔除从已知 Helius Sender 地址转入 feePayer 的金额（这些全是退款）。
+ *
+ *  修正后 buySol = (feePayer OUT to non-sender) + (feePayer OUT to sender) - (feePayer IN from sender)
+ *               = net outflow excluding Helius sender refunds
+ *
+ *  参考值：slot 456242694 目标 tx，修正前 2.00400228 SOL → 修正后 1.00251384 SOL，
+ *          与 RPC preBal-postBal 口径（1.00400228 SOL）接近（差 ~0.15%，在 price-impact 范围内）。
+ */
 export function calcBuySol(tx: HeliusEnhancedTx): number {
-  // SOL 净流出 = preBalance - postBalance，再扣 fee 即 buy 金额
-  // 但 tx 没有直接给 preBalance/postBalance，所以从 nativeTransfers 推算
   if (!tx.nativeTransfers) return 0;
 
-  const outLamports = tx.nativeTransfers
-    .filter((t) => t.fromUserAccount === tx.feePayer)
-    .reduce((sum, t) => {
-      // Helius 新版 API 返回的 amount 是字符串，需要转 number 再相加
-      const amt = typeof t.amount === 'string' ? Number(t.amount) : t.amount;
-      return sum + amt;
-    }, 0);
+  // 从 SOLANA_TIP_SOURCE_MAP 动态取所有 helius_sender 地址
+  // （不再硬编码——新增 Helius Sender 地址时只会改 map，不改此函数）
+  const heliusSenders = new Set(
+    Object.entries(SOLANA_TIP_SOURCE_MAP)
+      .filter(([, src]) => src === 'helius_sender')
+      .map(([addr]) => addr),
+  );
 
-  // 转换 lamports -> SOL（再加回 fee 与 tip 才是真正的 buy 支出）
-  // 但注意：fee 与 tip 都在 nativeTransfers 中体现（如果是 tip，则有 transfer 给 tip account）
-  // 我们这里用 rough estimate: outLamports / 1e9
-  return outLamports / LAMPORTS_PER_SOL;
+  let outLamports = 0;
+  let inFromSender = 0;
+
+  for (const t of tx.nativeTransfers) {
+    const amt = typeof t.amount === 'string' ? Number(t.amount) : t.amount;
+    if (t.fromUserAccount === tx.feePayer) {
+      outLamports += amt;
+    }
+    if (t.toUserAccount === tx.feePayer && heliusSenders.has(t.fromUserAccount)) {
+      // 从已知 Helius Sender 地址流入 feePayer 的 = 退款，需剔除
+      inFromSender += amt;
+    }
+  }
+
+  return (outLamports - inFromSender) / LAMPORTS_PER_SOL;
 }
 
 /**
@@ -178,7 +201,7 @@ export let SOLANA_TIP_ACCOUNTS: ReadonlySet<string> = new Set([
 
   // === Helius Sender（10 个，2026/10 文档）===
   '4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE',
-  'D2L6yP2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ',
+  'D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ',
   '9bnz4RShgq1hAnLnZbP8kbgBg1kEmcJBYQq3gQbmnSta',
   '5VY91ws6B2hMmBFRsXkoAAdsPHBJwRfBht4DXox3xkwn',
   '2nyhqdwKcJZR2vcqCyrYsaPVdAnFoJjiksCXJ7hfEYgD',
@@ -211,6 +234,46 @@ export let SOLANA_TIP_ACCOUNTS: ReadonlySet<string> = new Set([
   'ENxTEjSQ1YabmUpXAdCgevnHQ9MHdLv8tzFiuiYJqa13',
   '6rYLG55Q9RpsPGvqdPNJs4z5WTxJVatMB8zV3WJhs5EK',
   'Cix2bHfqPcKcM233mzxbLk14kSggUUiz2A87fJtGivXr',
+
+  // === 扩展 tip 通道（extended_tip；2026/10 扫 100 笔 target_trades 启发式发现的高频 tip 收款地址）===
+  // 触发条件：在 feePayer 出去的非 self SOL 转账中，出现 ≥3 次、典型金额固定、
+  //   且不在上面 4 通道（jito/helius_sender/landx/zero_slot）里。
+  // 推测服务（按地址前缀归类）：
+  //   - rapidXMVLw5uBieKH: "rapidX" 前缀 → 推测 rapidX 协议（0.015 SOL 固定）
+  //   - ASt2enHCghUd: "ASt" 前缀 → 推测 Astralane 系（0.001 SOL 固定）
+  //   - 其余按出现频次排序；同质化账户 = 同 tip 服务的多账户实现
+  // 如有更精准归类（Helius label / 协议官方文档），后续可把这些地址从 'extended_tip'
+  // 改成对应渠道。
+  // 未列入字典的 tip 收款地址：heuristicTipFallback 启发式兜底仍能识别（见下方）。
+  // Jito 多档（0.005/0.01/0.015/0.03 SOL；不在 Jito 8 标准账户里）
+  'BfFX9rUm8qTZiZjmeq9BktWVTNuG3YWMc5AvkrCKJike',
+  '3Tu1Y9aNveLFN4WTAwnAwXL6tbUp5MMe3RxyybG4jTAS',
+  '5vPNE6VFyXmCmzmWotdxmRk57LEWiXxuAfZL3hKbi2LH',
+  '2ApLdwLrGayEmxgpLX9BTR47Q2QprfMg5SpjrLeaK8s7',
+  '3PvqoztjnRxaAiFmLuEfqZkU4GSbjUareks8S2xCZaTa',
+  'HkJYryz2BNeMQfuuSWDYktWt5fZLV26eK6nqu7EJycoG',
+  // 0.003-0.01 SOL 中档（多次出现；推测 jito 4-fanout / Helius Sender 变体）
+  '46qnt5Lg1uPk6qkgMuuMisxACzwHVv4P2Nuv3wELCqk3',
+  'YYVEwYxUif4zSGdnBxLdHU1ej4kQTgxKrkD5VXDU8RC',
+  '2qDoKXbts4ePAv5NVhHZLuG7eFqB1ik58Nsb9aDArecj',
+  '7KKNPiFyi3b3VSM81sNEwHPxUGVZJHCTucqoh7rAABw4',
+  '7nFkbKooThkybP6NJLDEhayK54JHA9ziSSgcv3FG33ND',
+  // 0.014074 SOL 高频对（同时出现 → 同一 tip 服务的双账户）
+  '62qc2CNXwrYqQScmEdiZFFAnJR262PxWEuNQtxfafNgV',
+  '5YxQFdt3Tr9zJLvkFccqXVUwhdTWJQc1fFg2YPbxvxeD',
+  // 高频 0.0098 SOL（出现 23 次）
+  'J5XGHmzrRmnYWbmw45DbYkdZAU2bwERFZ11qCDXPvFB5',
+  // 高频 0.001481 SOL（出现 9 次；猜测某 sub-tip 服务）
+  'JDZA1U2w9xPBHQQWWAcDpfJNwPKo7ZKLGX2QgtNzgdkS',
+  // 其他中频 0.002~0.009 SOL
+  '3BpXnfJaUTiwXnJNe7Ej1rcbzqTTQUvLShZaWazebsVR',
+  'AVmoTthdrX6tKt4nDjco2D775W2YK3sDhxPcMmzUAmTY',
+  'H9bSW2VTrRU7LuT5Zo5XEx3uuGhLDTeAJdEUxQX39314',
+  '37qozS94Jyg5teJfippNf6XyfsKLuuVWCdXynAZUAphj',
+  // Astralane 系（前缀 ASt；0.001 SOL 固定；只列确认全地址的）
+  'ASt2enHCghUdhSHnJkjzKRMbuM5YiGbrXrCXs5pRSMor',
+  // rapidX（前缀 rapidX；0.015 SOL 固定）
+  'rapidXMVLw5uBieKHDGvF9k4xSSDXyD2FC5wLTAajaJ',
 ]);
 
 /**
@@ -230,7 +293,7 @@ export const SOLANA_TIP_SOURCE_MAP: Readonly<Record<string, import('./types').Ti
   'ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt': 'jito',
   // Helius Sender
   '4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE': 'helius_sender',
-  'D2L6yP2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ': 'helius_sender',
+  'D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ': 'helius_sender',
   '9bnz4RShgq1hAnLnZbP8kbgBg1kEmcJBYQq3gQbmnSta': 'helius_sender',
   '5VY91ws6B2hMmBFRsXkoAAdsPHBJwRfBht4DXox3xkwn': 'helius_sender',
   '2nyhqdwKcJZR2vcqCyrYsaPVdAnFoJjiksCXJ7hfEYgD': 'helius_sender',
@@ -261,6 +324,28 @@ export const SOLANA_TIP_SOURCE_MAP: Readonly<Record<string, import('./types').Ti
   'ENxTEjSQ1YabmUpXAdCgevnHQ9MHdLv8tzFiuiYJqa13': 'zero_slot',
   '6rYLG55Q9RpsPGvqdPNJs4z5WTxJVatMB8zV3WJhs5EK': 'zero_slot',
   'Cix2bHfqPcKcM233mzxbLk14kSggUUiz2A87fJtGivXr': 'zero_slot',
+  // 扩展 tip 通道（启发式发现的高频 tip 收款地址；详见 SOLANA_TIP_ACCOUNTS 注释）
+  'BfFX9rUm8qTZiZjmeq9BktWVTNuG3YWMc5AvkrCKJike': 'extended_tip',
+  '3Tu1Y9aNveLFN4WTAwnAwXL6tbUp5MMe3RxyybG4jTAS': 'extended_tip',
+  '5vPNE6VFyXmCmzmWotdxmRk57LEWiXxuAfZL3hKbi2LH': 'extended_tip',
+  '2ApLdwLrGayEmxgpLX9BTR47Q2QprfMg5SpjrLeaK8s7': 'extended_tip',
+  '3PvqoztjnRxaAiFmLuEfqZkU4GSbjUareks8S2xCZaTa': 'extended_tip',
+  'HkJYryz2BNeMQfuuSWDYktWt5fZLV26eK6nqu7EJycoG': 'extended_tip',
+  '46qnt5Lg1uPk6qkgMuuMisxACzwHVv4P2Nuv3wELCqk3': 'extended_tip',
+  'YYVEwYxUif4zSGdnBxLdHU1ej4kQTgxKrkD5VXDU8RC': 'extended_tip',
+  '2qDoKXbts4ePAv5NVhHZLuG7eFqB1ik58Nsb9aDArecj': 'extended_tip',
+  '7KKNPiFyi3b3VSM81sNEwHPxUGVZJHCTucqoh7rAABw4': 'extended_tip',
+  '7nFkbKooThkybP6NJLDEhayK54JHA9ziSSgcv3FG33ND': 'extended_tip',
+  '62qc2CNXwrYqQScmEdiZFFAnJR262PxWEuNQtxfafNgV': 'extended_tip',
+  '5YxQFdt3Tr9zJLvkFccqXVUwhdTWJQc1fFg2YPbxvxeD': 'extended_tip',
+  'J5XGHmzrRmnYWbmw45DbYkdZAU2bwERFZ11qCDXPvFB5': 'extended_tip',
+  'JDZA1U2w9xPBHQQWWAcDpfJNwPKo7ZKLGX2QgtNzgdkS': 'extended_tip',
+  '3BpXnfJaUTiwXnJNe7Ej1rcbzqTTQUvLShZaWazebsVR': 'extended_tip',
+  'AVmoTthdrX6tKt4nDjco2D775W2YK3sDhxPcMmzUAmTY': 'extended_tip',
+  'H9bSW2VTrRU7LuT5Zo5XEx3uuGhLDTeAJdEUxQX39314': 'extended_tip',
+  '37qozS94Jyg5teJfippNf6XyfsKLuuVWCdXynAZUAphj': 'extended_tip',
+  'ASt2enHCghUdhSHnJkjzKRMbuM5YiGbrXrCXs5pRSMor': 'extended_tip',
+  'rapidXMVLw5uBieKHDGvF9k4xSSDXyD2FC5wLTAajaJ': 'extended_tip',
 };
 
 /**
@@ -359,7 +444,66 @@ export const JITO_TIP_ACCOUNTS: ReadonlySet<string> = new Proxy(
 );
 
 /**
- * 计算 tip：转账给任意已知 tip 账户（Jito / Helius Sender / LandX / 0slot）的 lamports 累计 SOL。
+ * 启发式 tip 兜底：当 SOLANA_TIP_ACCOUNTS 查不到时，从 feePayer 出去的非 self SOL 转账中
+ * 挑"最小的那笔"作为 tip。
+ *
+ * 参考站（gmgn / dexscreener / photon）的实现思路：
+ *   - 在 nativeTransfers 中按 from=feePayer 过滤 → 拿到 feePayer 当笔 tx 的所有"流出"
+ *   - 排除 self-transfer（to == feePayer）
+ *   - 排除 buy 本身（"大额"，>= 30% buy_sol）
+ *   - 剩下的"小额"中取最小那笔 → 大概率是给 tip 服务的转账
+ *
+ * 验证（scripts/_diag-tip-min-only.ts，30 笔样本）：
+ *   - 无 tip 样本：28/30 笔能识别出 tip（93% 命中率）
+ *   - 有 tip 样本：22/30 笔完全一致（73%），8 笔偏低 0.003 SOL（Helius Sender 8-fanout，
+ *                启发式只取最小一笔，无法还原 fanout 总额）
+ *
+ * 安全边界：
+ *   - 上限 = buy_sol * 0.3（确保不会把 buy/rent 误算成 tip）
+ *   - 下限 = 0.0001 SOL（jito 最低档；低于此值多半是 fee refund / rent 退款）
+ *
+ * 返回 { tip, addr }：
+ *   - tip = 启发式识别的 SOL 数（已 lamports → SOL 转换）
+ *   - addr = 该最小转账的收款地址（可能为 null 当笔无任何"非 self"小额转账）
+ *   - 当收款地址已经在 SOLANA_TIP_ACCOUNTS 里时，addr 仍返回（便于上层一致处理）；
+ *     调用方一般应当先调 calcSolanaTip，本函数仅在 0 命中时作为 fallback 使用。
+ */
+export function heuristicTipFallback(
+  tx: HeliusEnhancedTx,
+  buySol: number,
+): { tip: number; addr: string | null } {
+  if (!tx.nativeTransfers || buySol <= 0) return { tip: 0, addr: null };
+
+  const LAMPORTS = 1_000_000_000;
+  const buyCap = buySol * 0.3;
+  const minLamports = 100_000; // 0.0001 SOL
+
+  // 按收款方聚合（同一收款方多笔转账合并）
+  const outByTo = new Map<string, number>();
+  for (const t of tx.nativeTransfers) {
+    if (t.fromUserAccount !== tx.feePayer) continue;
+    if (t.toUserAccount === tx.feePayer) continue; // 排除 self
+    const amt = typeof t.amount === 'string' ? Number(t.amount) : t.amount;
+    outByTo.set(t.toUserAccount, (outByTo.get(t.toUserAccount) ?? 0) + amt);
+  }
+
+  // 找"非 self 小额"中的最小那笔
+  let minAmt = Infinity;
+  let minAddr: string | null = null;
+  for (const [to, lam] of outByTo) {
+    if (lam < minLamports) continue; // 太小的不是 tip
+    if (lam / LAMPORTS > buyCap) continue; // 太大的不是 tip（大概率是 buy/rent）
+    if (lam < minAmt) {
+      minAmt = lam;
+      minAddr = to;
+    }
+  }
+  if (minAddr === null) return { tip: 0, addr: null };
+  return { tip: minAmt / LAMPORTS, addr: minAddr };
+}
+
+/**
+ * 计算 tip：转账给任意已知 tip 账户（Jito / Helius Sender / LandX / 0slot / extended_tip）的 lamports 累计 SOL。
  *
  * 旧名 calcJitoTip 已弃用，仍以别名 export 给外部脚本兼容。
  */
@@ -487,6 +631,22 @@ export function parseHeliusTx(tx: HeliusEnhancedTx): ParsedBuy | null {
   const mint = extractMint(tx);
   if (!mint) return null;
 
+  const buySol = calcBuySol(tx);
+  // tip 计算：先查已知 tip 字典（精确路径），0 命中时用启发式兜底（覆盖新通道）
+  let tipSol = calcSolanaTip(tx);
+  let tipAddr: string | null = null;
+  if (tipSol > 0) {
+    // 已知表命中：从 nativeTransfers 中挑"主要"的那笔 tip 转账
+    tipAddr = pickPrimaryTipTransfer(tx.nativeTransfers)?.toUserAccount ?? null;
+  } else {
+    // 已知表 0 命中：跑启发式兜底
+    const heur = heuristicTipFallback(tx, buySol);
+    if (heur.tip > 0) {
+      tipSol = heur.tip;
+      tipAddr = heur.addr;
+    }
+  }
+
   return {
     signature: tx.signature,
     slot: tx.slot,
@@ -495,8 +655,8 @@ export function parseHeliusTx(tx: HeliusEnhancedTx): ParsedBuy | null {
     blockTime: (tx as any).blockTime ?? (tx as any).timestamp ?? 0,
     address: tx.feePayer,
     mint,
-    buySol: calcBuySol(tx),
-    tipSol: calcSolanaTip(tx),
+    buySol,
+    tipSol,
     prioLamports: calcPriorityFee(tx),
     fee: tx.fee ?? 0,
     version: tx.version === 0 ? 'v0' : 'legacy',
@@ -504,21 +664,21 @@ export function parseHeliusTx(tx: HeliusEnhancedTx): ParsedBuy | null {
     hasAlt: txHasAlt(tx),
     bundleId: computeBundleId(tx),
     source: tx.source ?? '',
-    // 0010: tip 收款渠道；命中未知收款地址时写 'unknown'，方便后续 backfill。
-    // 用 pickPrimaryTipTransfer（按 amount 取最大单笔）替代 find，避免 Helius Sender
-    // fan-out 模式下 tipSource 标签在不同机器上随机跳。
-    tipSource: (() => {
-      const t = pickPrimaryTipTransfer(tx.nativeTransfers);
-      if (!t) return null;
-      const src = getTipSource(t.toUserAccount);
-      return src ?? 'unknown';
-    })(),
+    // 0010: tip 收款渠道；命中已知收款地址时写渠道名（jito/helius_sender/landx/zero_slot/extended_tip），
+    // 启发式识别但收款地址未列入字典时写 'extended_tip'，完全无 tip 时写 null。
+    tipSource: tipAddr
+      ? (getTipSource(tipAddr) ?? 'extended_tip')
+      : null,
     // success 判定：
     //   - Helius Enhanced Transactions API 在 tx 失败时通常带 transactionError 字段（非 null）
     //   - 拿不到时（webhook payload 等）默认 true（feePayer 已收 token = 买入成功完成）
     // 注：旧实现 `!tx.fee || true` 因 `|| true` 永远为 true，是个 dead branch。
     success: !(tx as any).transactionError,
-    tokenAmount: findInboundTransfer(tx)?.tokenAmount,
+    // Bug 2.1 修正：多跳 swap（Jupiter 路由）下 feePayer 会收到多笔 inbound，
+    //   tokenTransfers[0].tokenAmount 常常只是其中一笔，FIFO 配对基数就会少算。
+    //   改用 inboundTokenAmount 把同 mint 所有流入 feePayer 的 token 累加。
+    //   mint 已由上面的 extractMint() 锁定（fail-loud），可以直接用。
+    tokenAmount: inboundTokenAmount(tx, mint, tx.feePayer),
   };
 }
 

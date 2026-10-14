@@ -21,7 +21,7 @@ export async function GET() {
           WHERE b.target_signature = t.signature
         )
       `),
-      queryOne<{ count: string }>('SELECT COUNT(DISTINCT target_signature)::text AS count FROM block_analyses'),
+      queryOne<{ count: string }>('SELECT COUNT(DISTINCT t.signature)::text AS count FROM target_trades t WHERE EXISTS (SELECT 1 FROM block_analyses b WHERE b.target_signature = t.signature)'),
     ]);
     return NextResponse.json({
       ok: true,

@@ -37,10 +37,11 @@
  * TxView，这里只跟 TxView 打交道。换数据源不需要动这里的算法。
  */
 
-import { query } from './db';
+import { query, execute } from './db';
 import { isAkbotTx } from './akbot';
 import { markAsAkbot } from './pool';
 import { fetchTxViews, fetchSigsFrom, isFailedTx } from './tx-source';
+import { getTokenPriceSol } from './dex-price';
 
 /** token 数量配对容差：1e-3 个原始单位（pump.fun 是 6 位小数，即 1e-9 个 token） */
 const TOKEN_EPSILON = 1e-3;
@@ -261,10 +262,16 @@ export async function calcCopyPnl(opts: {
         continue;
       }
 
-      if (sentTokens <= 0) continue; // 与本 mint 无关的交易
-
       // 卖出：净收入按 token 数量比例分摊给被消耗掉的各个 lot
       const netIn = tx.solNet(wallet);
+      // 与本 mint 无关的交易（既没买入也没卖出本 mint，但有其他 token / SOL 进出）
+      //   跳过 —— 它们的 netIn 几乎都是 0，但显式判断更稳妥，省去后面冗余计算。
+      if (sentTokens <= 0) continue;
+      // Bug 2.2 过滤：钱包把 token 转给别人（不是卖）时，netIn 通常 ≤ 0；
+      //   不跳过会把 FIFO 队列的目标 token 错误地消耗掉，让状态被标记成
+      //   closed / partial 但 proceeds 实际为 0，看起来像一笔"白送"。
+      //   同样覆盖 pure-transfer 的 mint 转移（如迁移到别处钱包）。
+      if (netIn <= 0) continue;
       const sellFee = (tx.feeLamports || 5000) / 1e9;
       let left = sentTokens;
       let lotProceeds = 0;
@@ -404,4 +411,123 @@ export async function summarizePnlByDay(addresses: string[], fromTs: number, toT
     pnl: parseFloat(r.pnl || '0'),
     trades: r.trades,
   }));
+}
+
+/**
+ * 未实现 PnL（浮盈）字段落库的值。
+ *
+ * 设计要点：
+ *   - calcCopyPnl 的 pnl_sol 只覆盖「已实现部分」（已卖出的比例）。
+ *   - 本函数基于 token 实时价，把剩余持仓 (remainingTokenAmount) 的预估价值叠上去。
+ *   - 价格拉不到（Dex 撤池 / Birdeye 限流）就写 NULL —— UI 显示"—"，不编数字骗自己。
+ *
+ * 单位假设：block_buyers.token_amount 存的是「Helius decimal-adjusted 的浮点 human unit」，
+ *   与 calcCopyPnl 的 FIFO 配对口径一致。如果未来发现 token_amount 是 raw u64，
+ *   在这里改成 token_amount * price_sol_per_raw_unit（需要先拉 mint_decimals），但当前不动。
+ */
+export interface UnrealizedEnrichment {
+  current_price_sol: number | null;
+  unrealized_sol: number | null;
+  total_pnl_sol: number | null;
+  price_updated_at: Date;
+}
+
+export interface EnrichableBuyer {
+  mint: string;
+  /** 这笔买入的 token 数量（human unit）。null/<=0 时浮盈无意义 */
+  token_amount: number | string | null;
+  /** 买入花的 SOL（含 tip 等，不含 fee） */
+  buy_sol: number | string;
+  /** 这笔买入的真实 fee（lamports，含 base + priority）。默认 5000 */
+  buy_fee_lamports?: number | null;
+  /** 已实现 PnL（=calcCopyPnl 算出来的 pnlSol）。open 时通常是 0 / null */
+  pnl_sol: number | null;
+  /** token 已卖出的比例 0~1。open=0, closed=1 */
+  pnl_sold_ratio: number | string | null;
+  /** 'open' / 'partial' / 'closed' / 'buy_failed' 等 */
+  pnl_status: CopyPnlStatus | string | null;
+}
+
+export async function enrichWithUnrealized(b: EnrichableBuyer): Promise<UnrealizedEnrichment> {
+  // 拉价格。失败/拉不到时 priceSol=null，写库也存 null（UI 退化为仅看 pnl_sol）。
+  let priceSol: number | null = null;
+  try {
+    priceSol = await getTokenPriceSol(b.mint);
+  } catch {
+    priceSol = null;
+  }
+
+  const status = String(b.pnl_status ?? '');
+  const buySol = Number(b.buy_sol) || 0;
+  const buyFee = (b.buy_fee_lamports ?? 5000) / 1e9;
+  const totalCost = buySol + buyFee;
+  const buyTokenAmount = Number(b.token_amount) || 0;
+  const realized = b.pnl_sol ?? 0;
+
+  let unrealizedSol: number | null = null;
+  let totalPnlSol: number | null = null;
+
+  if (priceSol != null && priceSol > 0) {
+    if (status === 'closed' || status === 'buy_failed') {
+      // 持仓为 0：浮盈=0；总 PnL = 已实现
+      unrealizedSol = 0;
+      totalPnlSol = realized;
+    } else if (status === 'partial') {
+      const soldRatio = Number(b.pnl_sold_ratio) || 0;
+      const remaining = Math.max(0, buyTokenAmount * (1 - soldRatio));
+      const remainingCost = totalCost * (1 - soldRatio);
+      // 剩余持仓按当前价估值 - 按比例分摊的剩余成本 = 浮盈
+      unrealizedSol = remaining * priceSol - remainingCost;
+      // 总 PnL = 已实现（按 soldRatio 分摊过成本） + 浮盈
+      totalPnlSol = realized + unrealizedSol;
+    } else if (status === 'open') {
+      // 全仓持有：按当前价全卖一次的预估收益
+      unrealizedSol = buyTokenAmount * priceSol - totalCost;
+      // open 状态下 calcCopyPnl 的 realized 通常就是 0；总 PnL ≈ 浮盈
+      totalPnlSol = unrealizedSol;
+    }
+    // 其他 status（如 null / pending）：不写浮盈，留 null
+  }
+
+  return {
+    current_price_sol: priceSol,
+    unrealized_sol: unrealizedSol,
+    total_pnl_sol: totalPnlSol,
+    price_updated_at: new Date(),
+  };
+}
+
+/**
+ * 直接把 enrich 结果写回 DB 的便捷函数（refresh-unrealized.ts 共用）。
+ * 已计算但价格未变时不要刷（避免无谓写盘）—— 由调用方先 SELECT price_updated_at 决定。
+ *
+ * 失败策略：价格拉不到时（current_price_sol=null），把 price_updated_at 写为
+ *   1970（远过去的「伪时间戳」），filter `price_updated_at < NOW() - INTERVAL '60s'`
+ *   立即命中，下次轮询会重试 —— 不至于「30s 后疯狂重试」打到被限流的外部 API，
+ *   也不至于「写 now() 后等 60s 浪费时间」。
+ *   写远过去值让重试频率可由脚本实际跑批间隔决定（watch -n 30 / -n 60 / -n 300 都行）。
+ */
+export async function writeUnrealizedToBlockBuyer(
+  buyerId: number,
+  e: UnrealizedEnrichment,
+): Promise<void> {
+  const ts =
+    e.current_price_sol == null
+      ? new Date(0) // 1970-01-01 → 永远「过期」→ 下次轮询会重试
+      : e.price_updated_at;
+  await execute(
+    `UPDATE block_buyers
+        SET current_price_sol = $1,
+            unrealized_sol    = $2,
+            total_pnl_sol     = $3,
+            price_updated_at  = $4
+      WHERE id = $5`,
+    [
+      e.current_price_sol,
+      e.unrealized_sol,
+      e.total_pnl_sol,
+      ts,
+      buyerId,
+    ],
+  );
 }
