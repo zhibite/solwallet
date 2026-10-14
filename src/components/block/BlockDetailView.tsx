@@ -211,9 +211,9 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
   // 参考页 badge 颜色
   const badge = (cls: string) => cls;
 
-  // 角色判定（参考页优先级：目标本人 > 第一个狙击者 > 捆绑 > 前置 > 跟随）
+  // 角色判定（参考页优先级：我的账号 > 第一个狙击者 > 捆绑 > 前置 > 跟随）
+  // 注：目标本人已在 API 层过滤掉，此处不再需要 is_self 分支
   const roleTag = (b: Buyer) => {
-    if (b.is_self) return <span className="inline-block px-1.5 py-0.5 rounded text-xs bg-success-500/20 text-success-700 dark:text-success-400 border border-success-500/30">目标本人</span>;
     if (b.is_own) return <span className="inline-block px-1.5 py-0.5 rounded text-xs bg-success-500/20 text-success-700 dark:text-success-400">我的账号</span>;
     if (b.is_first_sniper) return <span className="inline-block px-1.5 py-0.5 rounded text-xs bg-purple-500/20 text-purple-700 dark:text-purple-400">第一个狙击者</span>;
     if (b.is_bundled) return <span className="inline-block px-1.5 py-0.5 rounded text-xs bg-amber-500/20 text-amber-700 dark:text-amber-400">捆绑</span>;
@@ -231,6 +231,8 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
   };
 
   // 渲染一行 buyer
+  // 注：目标本人已在 API 层过滤（isTarget 永远为 false），这里也保留以防
+  // 将来再次打开「展示目标本人」时无需再改模板。
   const buyerRow = (b: Buyer, isTarget: boolean) => (
     <tr
       key={b.id}
@@ -239,7 +241,7 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
           ? 'bg-brand-50 dark:bg-brand-500/10'
           : b.is_first_sniper
             ? 'bg-red-50 dark:bg-red-500/10'
-            : b.is_own || b.is_self
+            : b.is_own
               ? 'bg-success-50 dark:bg-success-500/10'
               : ''
       }`}
@@ -315,9 +317,10 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
       </td>
       <td className="px-3 py-2 text-center">
         <div className="flex items-center justify-center gap-1 text-xs flex-wrap">
+          {/* isTarget 永远为 false（目标本人已在 API 层过滤），保留条件仅为防御 */}
           {isTarget ? (
             <span className="text-gray-400">—</span>
-          ) : b.is_own || b.is_self ? (
+          ) : b.is_own ? (
             <button
               onClick={() => unclaimWallet(b.id, b.address)}
               disabled={recalculating}

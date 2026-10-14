@@ -21,9 +21,13 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ slot: stri
     const targetSig = result.analysis.target_signature;
     // 找出目标本人的交易（用于提取 target_address 和 target_buy_sol）
     const targetBuyer = result.buyers.find((b) => b.signature === targetSig);
-    const buyers: BlockBuyer[] = result.buyers.map((b) => ({
+    // 第 3 层展开只显示"狙击者 + 跟随者"：目标本人不展示（其地址 / 买入 SOL
+    // 已经单独挂到 analysis.target_address / target_buy_sol，摘要行直接读那里）。
+    // 这样 table 第 1 行就是"第一个狙击者"，与"我们显示的是从第 1 狙击开始"语义一致。
+    const otherBuyers = result.buyers.filter((b) => b.signature !== targetSig);
+    const buyers: BlockBuyer[] = otherBuyers.map((b) => ({
       ...b,
-      is_self: b.signature === targetSig,
+      is_self: false, // 目标本人已被过滤，这里永远 false
     }));
     return NextResponse.json({
       ok: true,
