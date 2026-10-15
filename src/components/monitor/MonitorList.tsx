@@ -7,50 +7,7 @@ import PrioSolAmount from "@/components/common/PrioSolAmount";
 import RelativeTime from "@/components/common/RelativeTime";
 import AddTargetForm from "./AddTargetForm";
 import TargetRow from "./TargetRow";
-
-interface Target {
-  id: number;
-  address: string;
-  label: string | null;
-  threshold_sol: string;
-  status: 'active' | 'paused';
-  record_count: number;
-  last_buy_at: string | null;
-  updated_at: string;
-  auto_follow: boolean;
-  /**
-   * 最近一笔 first_sniper 不为 null 的 trade（= 真正被抢过的最新一笔）。
-   */
-  last_sniper?: {
-    address: string;
-    signature: string;
-    offset_pos: number | null;
-    offset_ms: number | null;
-    tip_sol: string | null;
-    prio_lamports: number | null;
-    buy_sol: string | null;
-    tip_source: import('@/lib/types').TipSource | null;
-    slot: number;
-    mint: string;
-    block_time: string;
-    /** 狙击者那笔的 PnL（=「如果跟单这个狙击者能赚多少」） */
-    pnl_sol: string | null;
-    pnl_status: string | null;
-    pnl_sold_ratio: string | null;
-  } | null;
-  decision?: {
-    worth_score: number | null;
-    win_rate: number;
-    avg_pnl_sol: number;
-    p50_tip_sol: number | null;
-    p50_prio_lamports: number | null;
-    p75_tip_sol: number | null;
-    p75_prio_lamports: number | null;
-    success_count: number;
-    failed_count: number;
-    sample_size: number;
-  };
-}
+import type { Target } from "@/lib/types";
 
 interface Stats {
   activeTargets: number;

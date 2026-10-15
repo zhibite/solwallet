@@ -17,8 +17,8 @@
 
 import { Connection, PublicKey } from '@solana/web3.js';
 import { query } from './db';
-import { parseHeliusTx } from './parser';
-import { saveBlockAnalysis, applyFirstSniperToTarget } from './first-sniper';
+import { parseHeliusTx, solanaTxToHeliusEnhanced } from './parser';
+import { saveBlockAnalysis, applyFirstSniperToTarget, computeBulkBuyerPnL } from './first-sniper';
 import { scanForTarget } from './pool';
 import { quickAkbotCheck, isAkbotCircuitOpen } from './akbot';
 import { markAsAkbot } from './pool';
@@ -524,7 +524,8 @@ async function handlePumpFunLogs(
   try {
     const s = getState();
     const logMessages: string[] = logs.logs ?? [];
-    const sig = context.signature;
+    // Solana web3.js onLogs 回调里 signature 在 logs (LogInfo) 上，不在 context 上
+    const sig = logs.signature;
     if (!sig) return; // signature may be undefined in some WS events
 
     // Pump.fun 事件通过 program log 识别：
@@ -804,17 +805,34 @@ async function handleLogs(
   context: { slot: number; signature: string },
 ) {
   recordHeartbeat(); // 记录心跳，表明订阅活跃
-  if (!context.signature) return;
+  // Solana web3.js onLogs 回调里 signature 在 logs (LogInfo) 上，不在 context 上
+  const signature = logs.signature;
+  if (!signature) return;
+  // 性能优化：先看 logs.logs 是否包含 buy 相关关键字（RAYDIUM/PUMP/bonk 等 swap 指令的 log 模式），
+  // 没有就直接 return，避免对每个 slot 内无关 tx 都打一次 Helius RPC（45 个订阅同时触发 100+ req/min）。
+  // 关键字从 parseHeliusTx 的 isBuyTx 行为倒推：含 'Buy' / 'buy' / 'swap' 之一即有 buy 候选。
+  const logStrings = logs?.logs ?? [];
+  if (Array.isArray(logStrings) && logStrings.length > 0) {
+    const haystack = logStrings.join('\n');
+    if (!/Buy|buy|swap|Swap/i.test(haystack)) {
+      return;
+    }
+  }
   try {
     // 获取完整交易详情
-    const tx = await getTransactionDetails(context.signature);
+    const tx = await getTransactionDetails(signature);
     if (!tx) {
-      console.warn(`[ws-monitor] failed to get tx ${context.signature.slice(0, 12)}...`);
+      console.warn(`[ws-monitor] failed to get tx ${signature.slice(0, 12)}...`);
       return;
     }
 
-    // 解析交易
-    const buy = parseHeliusTx(tx);
+    // 适配：rpc.getTransaction 返回标准 RPC TransactionResponse；
+    //   parseHeliusTx 期待 Helius Enhanced 形状（带 tokenTransfers / source / type），
+    //   直接传会因 tokenTransfers === undefined 被 isBuyTx 判 false 然后静默 return null。
+    //   monitor.ts 的轮询路径走 helius.parseEvents() → parsedEventItemToEnhanced()，
+    //   WS 路径用 solanaTxToHeliusEnhanced()（已在 parser.ts 里）为同样的适配器。
+    const enhancedTx = solanaTxToHeliusEnhanced(tx);
+    const buy = parseHeliusTx(enhancedTx ?? tx);
     if (!buy) {
       // 不是买入交易
       return;
@@ -840,7 +858,7 @@ async function handleLogs(
 
     // 入库（复用 monitor.ts 的逻辑）
     console.log(
-      `[ws-monitor] 🚀 real-time trade detected! ${context.signature.slice(0, 12)}... ` +
+      `[ws-monitor] 🚀 real-time trade detected! ${signature.slice(0, 12)}... ` +
       `buyer=${buy.address?.slice(0, 8)}... buySol=${buy.buySol.toFixed(4)}`,
     );
 
@@ -1004,6 +1022,28 @@ async function ingestWsTrade(targetId: number, buy: any, rawTx: any) {
         : new Date().toISOString();
       await saveBlockAnalysis(buy.slot, buy.mint, buy.signature, blockTime, analyzeResult);
 
+      // 【P0 修复】立即算本 block 所有 buyer 的 PnL（fire-and-forget，不阻塞后面的 sniper 回填 / pool scan / akbot）
+      // 与 monitor.ts:295-308 保持完全一致；WS 路径之前漏掉了导致 sniper_pnl_sol 永远是 NULL。
+      setImmediate(() => {
+        computeBulkBuyerPnL(buy.slot, buy.mint)
+          .then((r) => {
+            if (r.results.length === 0) return;
+            const closed = r.results.filter((x) => x.status === 'closed').length;
+            const open   = r.results.filter((x) => x.status === 'open').length;
+            const errors = r.results.filter((x) => x.status === 'error').length;
+            console.log(
+              `[ws-monitor] immediate pnl slot=${buy.slot} mint=${buy.mint.slice(0, 8)}... ` +
+                `computed=${r.results.length} closed=${closed} open=${open} errors=${errors}`,
+            );
+          })
+          .catch((e) =>
+            console.warn(
+              `[ws-monitor] immediate pnl failed slot=${buy.slot}:`,
+              (e as Error)?.message ?? e,
+            ),
+          );
+      });
+
       // 识别第一狙击者 —— 走公共函数（详见 first-sniper.ts: applyFirstSniperToTarget）
       // 不在这里直接拼 SQL，三处共用一份逻辑才能保证 target_trades 和 block_buyers 不漂移。
       try {
@@ -1130,5 +1170,10 @@ export function getWsMonitorStatus() {
     subscribedTargetsCount: s.subscribedTargets.size,
     subscriptionsCount: s.subscriptions.size,
     akbotRetryQueueSize: akbotRetryQueue.length,
+    // 调试用：最后一次收到任意订阅事件的毫秒时间戳（0 = 从未）
+    lastHeartbeatAt: s.lastHeartbeatAt > 0 ? s.lastHeartbeatAt : null,
+    secondsSinceLastHeartbeat: s.lastHeartbeatAt > 0
+      ? Math.round((Date.now() - s.lastHeartbeatAt) / 1000)
+      : null,
   };
 }

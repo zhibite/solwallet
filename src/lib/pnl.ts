@@ -197,8 +197,20 @@ export async function calcCopyPnl(opts: {
   // isTarget 标出本笔买入：只有消耗到它的部分才计入收益。
   // 后面加仓的 lot 排在队尾，卖出它们的钱不能算到本笔头上 ——
   // 这正是旧实现虚高 50 倍的原因。
+  //
+  // --- FIFO 队列（每个 lot 是「一笔还没卖完的买入」） ---
+  //   isTarget 标出本笔买入：只有消耗到它的部分才计入收益。
+  //   后面加仓的 lot 排在队尾，卖出它们的钱不能算到本笔头上 ——
+  //   这正是旧实现虚高 50 倍的原因。
+  //
+  //   持仓时间窗口：HOLD_WINDOW_SEC（默认 10 分钟）之前的卖出才走 FIFO，
+  //   超出窗口的卖出/动作不再扫（signet wallet 当天交易量很大，逐签扫到签名页末尾
+  //   既拖慢又无效）。剩余持仓交给 refresh-unrealized cron 按当前价刷浮盈。
+  //   实测 sniper 90% 以上 1 分钟内清仓，10 分钟已能覆盖大部分波段玩法。
+  const HOLD_WINDOW_SEC = parseInt(process.env.PNL_HOLD_WINDOW_SEC ?? '600', 10); // 默认 10 分钟
+  const holdDeadline = opts.buyBlockTime + HOLD_WINDOW_SEC;
   const queue: Array<{ remaining: number; isTarget: boolean }> = [
-    { remaining: buyTokenAmount, isTarget: true },
+    { remaining: buyTokenAmount, isTarget: true }, // 本笔买入先入队
   ];
   let proceedsSol = 0;
   let sellFeeSol = 0;
@@ -207,6 +219,7 @@ export async function calcCopyPnl(opts: {
   let failedFeeSol = 0;
   let unparsed = 0;
   let ackedAkbot = false;
+  let stoppedByDeadline = false; // 时间窗口截止触发的 break，便于后面日志/打点
   const CHUNK = 100;
   let cursor = 0; // 下一个待取数的签名下标（买入本身已经单独取过了）
 
@@ -214,6 +227,13 @@ export async function calcCopyPnl(opts: {
   while (cursor < afterBuy.length) {
     // 本笔买入的 token 已经被卖光，之后发生什么已经不影响这一笔的收益
     if (soldTokenAmount >= buyTokenAmount - TOKEN_EPSILON) break;
+
+    // 持仓时间窗口截止：afterBuy 是按 blockTime 升序的，一旦第一笔超窗口，
+    //   后续都超，立刻停止。
+    if (afterBuy[cursor].blockTime > holdDeadline) {
+      stoppedByDeadline = true;
+      break;
+    }
 
     const end = Math.min(cursor + CHUNK, afterBuy.length);
     const batchSigs = afterBuy.slice(cursor, end);
@@ -331,6 +351,18 @@ export async function calcCopyPnl(opts: {
   if (unparsed > 0) {
     throw new Error(
       `有 ${unparsed} 笔交易没取到（RPC 限流或网络问题），结果不完整，未写入，请稍后重试`,
+    );
+  }
+
+  // 调试日志：被持仓时间窗口截止的 pnl，会打一条带 wallet/buySig/soldRatio 的 INFO。
+  //   这条只对 "pnl_sol 不是 null 但 has 持仓剩余" 的情况有意义（即 partial 但还有剩余 token）：
+  //   那一刻浮盈会交给 refresh-unrealized cron 按当前价刷，不会等 FIFO 把签名页翻到底。
+  if (stoppedByDeadline && process.env.PNL_DEBUG_DEADLINE === '1') {
+    const remainingAfter = Math.max(0, buyTokenAmount - soldTokenAmount);
+    console.log(
+      `[pnl] hit ${HOLD_WINDOW_SEC}s deadline wallet=${wallet.slice(0, 8)} buy=${opts.buySig.slice(0, 8)} ` +
+        `sold=${soldTokenAmount.toFixed(0)}/${buyTokenAmount.toFixed(0)} ` +
+        `remaining=${remainingAfter.toFixed(0)} proceeds=${proceedsSol.toFixed(4)}`,
     );
   }
 

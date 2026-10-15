@@ -193,3 +193,80 @@ export interface SolanaBlock {
     };
   }>;
 }
+
+// =====================================================================
+// 0020 共享：监控目标行
+//
+// 之前 TargetRow.tsx 和 MonitorList.tsx 各自定义了局部 `Target`，
+// 一个是「旧版」(pnl_sol / pnl_sold_ratio 必填、缺浮盈三件套)，
+// 一个是「0020 版」(三段式可选、缺 pnl_sold_ratio)，导致 tsc 报
+// "Two different types with this name exist, but they are unrelated"。
+//
+// 后端 /api/targets 实际是同时把两套字段都返回来（见
+// src/app/api/targets/route.ts 的 last_sniper_* 投影），所以这里
+// 把所有字段并到同一个类型上，并标成可选。
+// =====================================================================
+
+/** 该监控目标最近一笔「真的被抢过」的 first_sniper 买入 */
+export interface TargetLastSniper {
+  address: string;
+  signature: string;
+  /** block 内相对目标 tx 的位置差 */
+  offset_pos: number | null;
+  /** block 内相对目标 tx 的时间偏移（ms） */
+  offset_ms: number | null;
+  tip_sol: string | null;
+  prio_lamports: number | null;
+  buy_sol: string | null;
+  tip_source: TipSource | null;
+  slot: number;
+  mint: string;
+  block_time: string;
+  /** 【P1-#3】目标自己在这一笔的 tip（不是狙击者的 tip） */
+  target_tip_sol: string | null;
+  /** 【P1-#3】目标自己在这一笔的 prio fee（不是狙击者的 prio） */
+  target_prio_lamports: number | null;
+  /** 狙击者那笔的 PnL（=「如果跟单这个狙击者能赚多少」） */
+  pnl_sol: string | null;
+  /** open=持仓中 / closed=已平仓 / partial=部分平仓 / buy_failed=买入失败 */
+  pnl_status: string | null;
+  /** 已卖出比例 0~1（老版字段，0020 后继续保留） */
+  pnl_sold_ratio: string | null;
+  /** 0020: 浮盈（未实现），open/partial 才有意义；closed 时 = 0 */
+  unrealized_sol: string | null;
+  /** 0020: 总 PnL = pnl_sol(已实现) + unrealized_sol，UI 主显示值 */
+  total_pnl_sol: string | null;
+  /** 0020: 当前价格 SOL 单位（拉不到为 null） */
+  current_price_sol: string | null;
+  /** 0020: 价格刷新时间（> 60s 没刷 UI 标 ~ 表示可能过期） */
+  price_updated_at: string | null;
+}
+
+/** 跟单决策聚合（由后端 /api/targets 一起返回） */
+export interface TargetDecision {
+  worth_score: number | null;
+  win_rate: number;
+  avg_pnl_sol: number;
+  p50_tip_sol: number | null;
+  p50_prio_lamports: number | null;
+  p75_tip_sol: number | null;
+  p75_prio_lamports: number | null;
+  success_count: number;
+  failed_count: number;
+  sample_size: number;
+}
+
+/** 监控列表里的一行目标 */
+export interface Target {
+  id: number;
+  address: string;
+  label: string | null;
+  threshold_sol: string;
+  status: TargetStatus;
+  record_count: number;
+  last_buy_at: string | null;
+  updated_at: string;
+  auto_follow: boolean;
+  last_sniper?: TargetLastSniper | null;
+  decision?: TargetDecision;
+}

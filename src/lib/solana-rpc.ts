@@ -6,7 +6,6 @@
 
 import { Connection, PublicKey, Commitment, BlockResponse, TransactionResponse } from '@solana/web3.js';
 import { getMultiRpc } from './multi-rpc';
-
 const HELIUS_RPCS = (process.env.SOLANA_RPCS ?? '')
   .split(',')
   .map((s) => s.trim())
@@ -78,7 +77,7 @@ class SolanaRPC {
       case 'getSignaturesForAddress':
         return conn.getSignaturesForAddress(new PublicKey(params[0]), params[1] ?? { limit: 100 });
       case 'getSlot':
-        return conn.getSlot();
+        return conn.getSlot((params[0] ?? 'confirmed') as Commitment);
       case 'getBlockHeight':
         return conn.getBlockHeight();
       default:
@@ -98,8 +97,131 @@ class SolanaRPC {
     return this.rpc<any[]>('getSignaturesForAddress', [address, { limit, ...(before ? { before } : {}) }]);
   }
 
-  async getSlot(): Promise<number> {
-    return this.rpc<number>('getSlot', []);
+  /**
+   * 取当前 slot（默认 commitment='confirmed'，跟 analyzeBlock 的等待语义一致）。
+   * 显式指定 commitment 让 first-sniper 的"链头已推进"判断与业务保持一致。
+   */
+  async getSlot(_commitment: Commitment = 'confirmed'): Promise<number> {
+    return this.rpc<number>('getSlot', [_commitment]);
+  }
+
+  /**
+   * 订阅 slotUpdates 推送 —— 链头每推进一个 slot，回调收到
+   * `{ slot, parent, root }`。返回 subscriptionId，调用方负责 removeSlotChangeListener
+   * 取消订阅避免泄漏。
+   *
+   * 用于 first-sniper 等「等链头追到目标 slot 再 getBlock」的事件驱动场景，
+   * 比按 200ms 节奏轮询 getSlot 省一次 socket IO。
+   *
+   * 关键：必须传 `commitment='confirmed'`，否则 web3.js 默认是 `finalized`，
+   * 通知会延迟到 slot finalized（~12-15s 后），`waitForSlotConfirmed` 的 3s
+   * 超时必触发，slow path 完全失效。
+   *
+   * 必须有 Helius 连接：当前 free RPC 池没暴露 Connection 句柄，后续需要的话
+   * 再说 —— 99% 运行时都有 helius 配置。
+   */
+  async onSlotChange(
+    callback: (slotInfo: { slot: number; parent: number | null; root: number }) => void,
+  ): Promise<number> {
+    if (!this.heliusConn) {
+      throw new Error('[rpc] onSlotChange: helius connection unavailable');
+    }
+    // 第二参数 commitment 在 web3.js 1.95+ 可用；通过 as any 兼容旧类型定义
+    return (this.heliusConn as any).onSlotChange(callback, 'confirmed');
+  }
+
+  /**
+   * 等目标 slot 进入 confirmed 状态后 resolve。
+   *
+   * 策略：
+   *   1) 快速查一次 getSlot（已 confirmed 直接返回，节省一次订阅往返）。
+   *   2) 订阅 onSlotChange(commitment='confirmed')，callback 内 slotInfo.slot >= targetSlot
+   *      就 resolve 并立刻取消订阅，避免 Helius WS 长挂。
+   *   3) timeoutMs 超时兜底：返回 timedOut=true，让上层继续走原本的 getBlock 重试路径。
+   *
+   * 没有 Helius 连接时退化为 150ms 节奏轮询 getSlot（仅本地测试用，生产环境都走 Helius）。
+   */
+  async waitForSlotConfirmed(
+    targetSlot: number,
+    timeoutMs = 3000,
+  ): Promise<{ confirmed: boolean; timedOut: boolean }> {
+    if (timeoutMs <= 0) return { confirmed: false, timedOut: true };
+
+    // 1) 快路径
+    try {
+      const cur = await this.getSlot();
+      if (cur >= targetSlot) return { confirmed: true, timedOut: false };
+    } catch {
+      // getSlot 失败不致命
+    }
+
+    // 2) 没有 Helius：轮询兜底
+    const conn = this.heliusConn;
+    if (!conn) {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        try {
+          const cur = await this.getSlot();
+          if (cur >= targetSlot) return { confirmed: true, timedOut: false };
+        } catch {
+          // 忽略
+        }
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      return { confirmed: false, timedOut: true };
+    }
+
+    // 3) 订阅路径
+    return new Promise((resolve) => {
+      let resolved = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let subId: number | null = null;
+      const safeConn = conn!;
+
+      const cleanup = (timedOut: boolean) => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        if (subId !== null) {
+          safeConn.removeSlotChangeListener(subId).catch(() => {});
+          subId = null;
+        }
+        resolve({ confirmed: !timedOut, timedOut });
+      };
+
+      timer = setTimeout(() => {
+        if (resolved) return;
+        resolved = true;
+        cleanup(true);
+      }, timeoutMs);
+
+      this.onSlotChange((slotInfo) => {
+        if (resolved) return;
+        if (slotInfo.slot >= targetSlot) {
+          resolved = true;
+          cleanup(false);
+        }
+      })
+        .then((id) => {
+          if (resolved) {
+            // 超时先 fire，立刻撤销本次订阅避免泄漏
+            safeConn.removeSlotChangeListener(id).catch(() => {});
+          } else {
+            subId = id;
+          }
+        })
+        .catch((err: any) => {
+          // 订阅失败：打日志让生产环境可排查
+          console.warn(
+            `[rpc] waitForSlotConfirmed(${targetSlot}) subscribe failed: ${err?.message ?? err}`,
+          );
+          if (!resolved) {
+            resolved = true;
+            cleanup(true);
+          }
+        });
+    });
   }
 
   /** 查看端点状态（debug 用） */

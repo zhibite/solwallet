@@ -387,8 +387,43 @@ export async function fetchSigsFrom(address: string, fromSig: string): Promise<S
   const cached = sigCache.get(key);
   if (cached) return cached;
 
+  // 0) 优先走 Helius getSignaturesForAddress（1 cr/req，比 multi-rpc 翻页稳定且便宜）。
+  //    Helius 限流/超时/网络错误 → 静默回落到下面的 multi-rpc 路径。
+  //    没配 HELIUS_API_KEY 时直接跳到 multi-rpc（行为兼容）。
+  if (process.env.HELIUS_API_KEY) {
+    try {
+      const { getHelius } = await import('./helius');
+      const helius = getHelius();
+      const heliusBatch: SigInfo[] = [];
+      let heliusBefore: string | undefined;
+      for (let i = 0; i < MAX_SIG_PAGES; i++) {
+        const batch = await helius.getSignaturesForAddress(address, {
+          limit: SIG_PAGE_SIZE,
+          ...(heliusBefore ? { before: heliusBefore } : {}),
+          until: fromSig,
+        });
+        if (!batch || batch.length === 0) break;
+        for (const s of batch) {
+          heliusBatch.push({
+            signature: s.signature,
+            slot: s.slot,
+            blockTime: s.blockTime ?? 0,
+            err: (s.err ?? null) as any,
+          });
+        }
+        if (batch.length < SIG_PAGE_SIZE) break;
+        heliusBefore = batch[batch.length - 1].signature;
+      }
+      const result = heliusBatch.reverse();
+      rememberSigs(key, result);
+      return result;
+    } catch {
+      // 静默回落 multi-rpc（限流/超时/网络错误，不打 warn 避免日志刷屏）
+    }
+  }
+
   const rpc = getMultiRpc();
-  const collected: SigInfo[] = [];   
+  const collected: SigInfo[] = [];
   let before: string | undefined;
 
   for (let i = 0; i < MAX_SIG_PAGES; i++) {

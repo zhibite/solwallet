@@ -4,12 +4,65 @@
  * 然后识别第一个狙击者（最早买入的）、跟随者、自己账号。
  */
 
+import type { BlockResponse } from '@solana/web3.js';
 import { query, queryOne, execute } from './db';
+import { runWithConcurrency } from './concurrency';
 import { getHelius, parsedEventItemToEnhanced } from './helius';
 import { getRPC } from './solana-rpc';
 import { parseHeliusTx, parseBlockTxs, calcBuySol, findInboundTransfer, type ParsedBuy } from './parser';
 import { calcCopyPnl } from './pnl';
 import type { BlockBuyer } from './types';
+
+// ============ 改动 1：slot 进度跟踪（替代盲目 getBlock 轮询）============
+//
+// 为什么：
+//   - WS 通知在 'confirmed' 触发时，slot 经常刚被处理，getBlock 拿不到
+//     （validator 节点还没把 block 落到 store）。
+//   - 旧版靠指数退避硬轮询，最长 10s 浪费。getRPC().waitForSlotConfirmed()
+//     用 onSlotChange 订阅链头进度，chainHead >= targetSlot 时立即返回，
+//     几乎 0 延迟拿到 block（典型从 ~1-2s 降到 ~50ms）。
+//   - 该方法内部已经处理：超时（timeoutMs 内没等到就 resolve false，
+//     上层继续走原重试）、订阅失败兜底、订阅泄漏清理。
+//
+// 改动 3 联动：getBlock 结果按 slot 缓存，同 slot 的并发 / 后续请求直接复用。
+
+// ============ 改动 3：按 slot 缓存 getBlock 结果 ============
+//
+// 为什么：
+//   - 一个 slot 里通常有 N 笔不同目标的 buy 同时触发 analyzeBlock(slot, mint, ...)，
+//     getBlock(slot) 是同一份 200-500ms 的 RPC 工作，重复打是浪费。
+//   - Helius Enhanced 信息（H 带回来的）或别处也可能再次按 slot 拉全块。
+//   - 给同一个 slot 的多次 analyze 复用第一次拉到的内存块，对前端抢单高峰期的
+//     slot 突发尤其有用（典型场景：10 个目标地址的 buy 都落在同一个 slot 里）。
+//
+// 为什么 TTL 而非 LRU：
+//   - Solana slot 在 ~12s 后就基本不再被查了（前端热点只会持续 1-2 波重查）。
+//   - 60s TTL 既能覆盖同 slot 的 burst，也能让老 slot 自动过期释放内存。
+//   - 简单实现胜过 LRU 的复杂度（这里不需要严格的容量上限）。
+//
+// 注意：
+//   - 只缓存"成功返回的"块；null 结果不缓存（让下一次重试可以再次打 RPC）。
+//   - 用 rpc.getBlock 拉到的就是 @solana/web3.js 的 BlockResponse，与已存的 type 兼容。
+//   - 多个 analyzeBlock 命中同一 slot 时，复用 Promise 避免重复 in-flight 请求。
+const BLOCK_CACHE_TTL_MS = 60_000;
+type BlockCacheEntry = { block: BlockResponse; fetchedAt: number };
+const blockCache = new Map<number, BlockCacheEntry>();
+// in-flight 跟踪：同一 slot 的并发请求复用同一个 Promise
+const blockInflight = new Map<number, Promise<BlockResponse | null>>();
+
+function readBlockCache(slot: number): BlockResponse | null {
+  const e = blockCache.get(slot);
+  if (!e) return null;
+  if (Date.now() - e.fetchedAt > BLOCK_CACHE_TTL_MS) {
+    blockCache.delete(slot);
+    return null;
+  }
+  return e.block;
+}
+
+function writeBlockCache(slot: number, block: BlockResponse): void {
+  blockCache.set(slot, { block, fetchedAt: Date.now() });
+}
 
 export interface AnalyzeBuyer {
   blockIndex: number;
@@ -80,32 +133,57 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
   const slotNum = Number(slot);
 
   // ── 辅助：带重试的 getBlock ──────────────────────────────────────────
-  // RPC 节点在 slot 刚确认时可能还没同步完（webhook 提前触发的情况很常见），
-  // 直接 fail 会让 first_sniper 永远丢失。改成指数退避重试，最长等 ~10s。
+  // 改动 1：先等链头推进到 targetSlot（getRPC().waitForSlotConfirmed），
+  //         再调 getBlock。slot 已 confirmed 后再拉，几乎 0 等待。
+  // 改动 3：getBlock 结果按 slot 缓存 + in-flight 复用，同 slot 的
+  //         并发 / 后续请求直接复用第一次拉到的 BlockResponse。
+  // 兜底仍然是 10s 硬超时，行为不会变差。
   const MAX_WAIT_MS = 10_000;
-  const BASE_INTERVAL_MS = 500;
 
-  async function getBlockWithRetry(targetSlot: number, label: string) {
-    const start = Date.now();
-    let attempt = 0;
-    while (true) {
-      attempt++;
-      // getBlock 内部已有 Helius 限流退避 + free RPC fallback，直接用
-      const b = await rpc.getBlock(targetSlot, { transactionDetails: 'full' });
-      if (b) return b;
-      const elapsed = Date.now() - start;
-      if (elapsed >= MAX_WAIT_MS) {
-        console.error(`[analyzeBlock] getBlock(${targetSlot}) timed out after ${elapsed}ms`);
-        return null;
+  async function getBlockWithRetry(targetSlot: number) {
+    // 0) 命中缓存：秒返回
+    const cached = readBlockCache(targetSlot);
+    if (cached) return cached;
+
+    // 1) 命中 in-flight：复用其他调用方正在拉的 Promise
+    const inflight = blockInflight.get(targetSlot);
+    if (inflight) return inflight;
+
+    // 2) 新的拉取任务
+    const fetchPromise = (async () => {
+      // 改动 1：先等链头推进到 targetSlot。最长等 3s，到点就走原重试逻辑。
+      //         行为完全兼容：waitForSlotConfirmed 超时返回 false，不阻塞。
+      await rpc.waitForSlotConfirmed(targetSlot, Math.min(MAX_WAIT_MS, 3000)).catch(() => {});
+      const start = Date.now();
+      let attempt = 0;
+      while (true) {
+        attempt++;
+        // getBlock 内部已有 Helius 限流退避 + free RPC fallback，直接用
+        const b = await rpc.getBlock(targetSlot, { transactionDetails: 'full' });
+        if (b) {
+          writeBlockCache(targetSlot, b);
+          return b;
+        }
+        const elapsed = Date.now() - start;
+        if (elapsed >= MAX_WAIT_MS) {
+          console.error(`[analyzeBlock] getBlock(${targetSlot}) timed out after ${elapsed}ms`);
+          return null;
+        }
+        // 等 slot 确认（webhook 提前触发的场景）
+        const wait = Math.min(500 * Math.pow(1.5, attempt - 1), 2000) + Math.random() * 200;
+        await new Promise((r) => setTimeout(r, wait));
       }
-      // 等 slot 确认（webhook 提前触发的场景）
-      const wait = Math.min(500 * Math.pow(1.5, attempt - 1), 2000) + Math.random() * 200;
-      await new Promise((r) => setTimeout(r, wait));
+    })();
+    blockInflight.set(targetSlot, fetchPromise);
+    try {
+      return await fetchPromise;
+    } finally {
+      blockInflight.delete(targetSlot);
     }
   }
 
   // ── 拉取当前 slot ───────────────────────────────────────────────────
-  const block = await getBlockWithRetry(slotNum, `slot ${slotNum}`);
+  const block = await getBlockWithRetry(slotNum);
   if (!block) return emptyResult;
 
   // 3) 解析出所有买入 mint 的 tx（同 slot）
@@ -114,9 +192,11 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
   const sameSlotBuys = parseBlockTxs(block as any, mint);
 
   // 4) 尝试拉取下一 slot 的交易（跟随者通常落在 slot+1）
+  //    改动 3：slot+1 也走 getBlockWithRetry —— 复用同一 slot 的 in-flight / cache，
+  //    并且 slot+1 通常还没确认，等链头推进到 slot+1+2 后再 getBlock 更稳。
   let nextSlotBuys: ParsedBuy[] = [];
   try {
-    const nextBlock = await rpc.getBlock(slotNum + 1, { transactionDetails: 'full' });
+    const nextBlock = await getBlockWithRetry(slotNum + 1);
     if (nextBlock) {
       nextSlotBuys = parseBlockTxs(nextBlock as any, mint);
     }
@@ -125,20 +205,23 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
     console.warn('[analyzeBlock] getBlock next slot failed', err);
   }
 
-  // 5) 用 Helius Parsed Events 补充 TIP 和 PRIO（批量，10 cr/整个请求）
-  //    相比旧 Enhanced Transactions（100 cr/请求）便宜 10 倍。
+  // 5) 用 Helius 补充 TIP / PRIO / buySol / tokenAmount
+  //    改动 2：parseEvents（10 cr）和 batchFetchEnhanced（100 cr）并发跑，
+  //    旧版串行总耗时 = A + B，现 = max(A, B)，单次省 300-800ms。
+  //    失败语义保留：任一失败不会阻塞另一路；失败的签名落回 RPC 余额差。
+  //    Enhanced Tx 端点单批上限 15 条签名，超出分批（200ms 间隔避免 Helius 限流）。
   const allRawBuys = [
     ...sameSlotBuys.map((b) => ({ ...b, _slot: slotNum })),
     ...nextSlotBuys.map((b) => ({ ...b, _slot: slotNum + 1 })),
   ];
   const sigs = allRawBuys.map((b) => b.signature);
 
-  // 5a) 先拿 Parsed Events（10 cr）：用于 tipSource / bundleId 等元数据
-  let enhancedMap = new Map<string, NonNullable<ReturnType<typeof parseHeliusTx>>>();
-  if (sigs.length > 0 && sigs.length <= 100) {
+  // 5a) 拉 Parsed Events（10 cr）—— 用于 tipSource / bundleId / address
+  const parseEventsPromise: Promise<Map<string, NonNullable<ReturnType<typeof parseHeliusTx>>>> = (async () => {
+    if (sigs.length === 0 || sigs.length > 100) return new Map();
     try {
       const eventItems = await helius.parseEvents(sigs);
-      enhancedMap = new Map(
+      return new Map(
         eventItems
           .map((item) => {
             const enhanced = parsedEventItemToEnhanced(item);
@@ -148,53 +231,56 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
       );
     } catch (err) {
       console.warn('[analyzeBlock] parsed-events parse failed, fall back to RPC only', err);
+      return new Map();
     }
-  }
+  })();
 
-  // 5b) 再拿 Enhanced Transactions API（100 cr/request）：用于 buySol（nativeTransfers 计算）
-  //     优先用这个，与参考网站口径对齐；拿不到才 fallback 到 RPC 余额差
-  const enhancedBuySolMap = new Map<string, { buySol: number; tokenAmount: number | null }>();
-  if (sigs.length > 0 && sigs.length <= 15) {
-    // Enhanced Tx 端点单批上限 15 条签名，超过则跳过（用 RPC 兜底）
+  // 5b) 拉 Enhanced Transactions（100 cr）—— 用于 buySol / tokenAmount
+  //     <=15 一批；>15 分批（200ms 间隔）
+  const batchEnhancedPromise: Promise<Map<string, { buySol: number; tokenAmount: number | null }>> = (async () => {
+    const out = new Map<string, { buySol: number; tokenAmount: number | null }>();
+    if (sigs.length === 0) return out;
     try {
-      const enhancedRawMap = await helius.batchFetchEnhanced(sigs);
-      for (const [sig, tx] of enhancedRawMap) {
-        const buySol = calcBuySol(tx);
-        const tokenAmt = findInboundTransfer(tx)?.tokenAmount ?? null;
-        enhancedBuySolMap.set(sig, { buySol, tokenAmount: tokenAmt });
+      if (sigs.length <= 15) {
+        const enhancedRawMap = await helius.batchFetchEnhanced(sigs);
+        for (const [sig, tx] of enhancedRawMap) {
+          const buySol = calcBuySol(tx);
+          const tokenAmt = findInboundTransfer(tx)?.tokenAmount ?? null;
+          out.set(sig, { buySol, tokenAmount: tokenAmt });
+        }
+      } else {
+        for (let i = 0; i < sigs.length; i += 15) {
+          const batch = sigs.slice(i, i + 15);
+          const enhancedRawMap = await helius.batchFetchEnhanced(batch);
+          for (const [sig, tx] of enhancedRawMap) {
+            const buySol = calcBuySol(tx);
+            const tokenAmt = findInboundTransfer(tx)?.tokenAmount ?? null;
+            out.set(sig, { buySol, tokenAmount: tokenAmt });
+          }
+          if (i + 15 < sigs.length) await new Promise((r) => setTimeout(r, 200));
+        }
       }
     } catch (err) {
       console.warn('[analyzeBlock] batchFetchEnhanced failed, buySol falls back to RPC', err);
     }
-  } else if (sigs.length > 15) {
-    // 超过 15 条时，分批调用（每批 15 条）
-    try {
-      for (let i = 0; i < sigs.length; i += 15) {
-        const batch = sigs.slice(i, i + 15);
-        const enhancedRawMap = await helius.batchFetchEnhanced(batch);
-        for (const [sig, tx] of enhancedRawMap) {
-          const buySol = calcBuySol(tx);
-          const tokenAmt = findInboundTransfer(tx)?.tokenAmount ?? null;
-          enhancedBuySolMap.set(sig, { buySol, tokenAmount: tokenAmt });
-        }
-        // 批次间隔 200ms 避免 Helius 限流
-        if (i + 15 < sigs.length) await new Promise((r) => setTimeout(r, 200));
-      }
-    } catch (err) {
-      console.warn('[analyzeBlock] batchFetchEnhanced (batched) failed, buySol falls back to RPC', err);
-    }
-  }
+    return out;
+  })();
+
+  // 改动 2 核心：两路并发
+  const [enhancedMap, enhancedBuySolMap] = await Promise.all([parseEventsPromise, batchEnhancedPromise]);
 
   // 6) 取自己的钱包列表
   const ownWallets = (await query<{ address: string }>('SELECT address FROM own_wallets')).map((w) => w.address);
   const ownSet = new Set(ownWallets);
 
-  // 7) 合并并排序：同 slot 按 blockIndex 升序，跨 slot 时同 slot 在前
+  // 7) 合并并排序：同 slot 按块内执行位置（txIndex）升序，跨 slot 时同 slot 在前
   type Enriched = {
     buy: ParsedBuy;
     slot: number;
     slotOffset: 0 | 1;
     offsetMs: number;
+    /** 块内真实执行位置（= wrapper 在 block.transactions 里的下标）。参考站口径。 */
+    txIndex: number;
     /** 来自 Enhanced Transactions API 的 buySol，优先于 buy.buySol */
     buySolOverride?: number;
     /** 来自 Enhanced Transactions API 的 tokenAmount，优先于 buy.tokenAmount */
@@ -210,25 +296,28 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
       slot: b._slot,
       slotOffset: b._slot === slotNum ? 0 : 1,
       offsetMs: targetBlockTime ? (b.blockTime - targetBlockTime) * 1000 : 0,
+      // 始终保留 parseBlockTxs 写入的块内位置。Helius enhanced 路径不会带这个字段，
+      // 即使 b.buy 被替换成 enhanced 解析结果，txIndex 仍然是块内真实位置。
+      txIndex: b.txIndex ?? 0,
       buySolOverride: buySolData?.buySol,
       tokenAmountOverride: buySolData?.tokenAmount,
     };
   });
 
-  // 同 slot 内按 blockTime 升序，跨 slot 时 slot 0 在前。
+  // 同 slot 内按块内执行位置（txIndex）升序，跨 slot 时 slot 0 在前。
   //
-  // 关键：不能用 parseBlockTxs 的输出顺序（= getBlock 返回的 transactions 数组顺序）
-  // 当作"执行顺序"。Solana 公共 RPC / Helius 普通 endpoint 的 getBlock 文档明确
-  // 不保证交易顺序（PoH 序号靠前的 tx 在数组里可能排在任意位置）。
-  // 参考站用 Helius Enhanced Transactions 的 blockTime 升序来判断"谁先抢到"，
-  // 所以这里也按 blockTime 升序——和它口径一致。
+  // 关键：之前用 blockTime 排序是错的。Solana 同一个 slot 里的所有交易共享
+  // 同一个 Unix 秒（blockTime 是 slot 级时间戳，不是 tx 级），所以那层比较
+  // 永远相等，最后 fallback 到 enriched 数组原顺序——也就是「同 mint buy 数组里」
+  // 的位置，不是块内真实位置。busy slot 里有几十到几百笔非 buy tx 把 sniper
+  // 往后挤，导致我们的 offset 看起来远大于参考站。
   //
-  // blockTime 同值（同 slot 的 tx blockTime 经常是同一个 Unix 秒）时，
-  // 退回到 enriched 数组原顺序（即 parseBlockTxs 的输出），保留"先看到先算"语义。
+  // 参考站口径：用 getBlock 返回的 transactions 数组下标（= 块内真实执行位置）
+  // 当作 offset。txIndex 就是这个下标（parseBlockTxs 写入）。
+  // Solana RPC 文档保证 getBlock 返回 transactions 顺序与块内处理顺序一致。
   const ordered = [...enriched].sort((a, b) => {
     if (a.slotOffset !== b.slotOffset) return a.slotOffset - b.slotOffset;
-    if (a.buy.blockTime !== b.buy.blockTime) return a.buy.blockTime - b.buy.blockTime;
-    return enriched.indexOf(a) - enriched.indexOf(b);
+    return a.txIndex - b.txIndex;
   });
 
   // ── 8b) 补漏：如果目标交易不在 ordered 里（parseBlockTxs 因 postToken 漏报而丢失了它），
@@ -257,11 +346,17 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
     } else {
       const targetSlotOffset: 0 | 1 = 0; // slot 相等时一定是 same slot
       const targetOffsetMs = targetBlockTime ? (targetBuy.blockTime - targetBlockTime) * 1000 : 0;
+      // 注入目标在 block.transactions 里的真实下标未知（同 slot 内有多少非 buy tx 把目标挤到哪
+      // 一步不可知）。给一个不影响排序的占位值：放在同 slot 最大 txIndex 之后。
+      // mark / first_sniper 检测仍按 idx 走（见 9) 段），所以这个占位不影响狙击者识别，
+      // 只是 injected 那笔自己的 offset_pos 会偏大（参考站同类场景也会这样）。
+      const sameSlotMaxTx = ordered.reduce((m, e) => (e.slotOffset === 0 ? Math.max(m, e.txIndex) : m), 0);
       const injected: Enriched = {
         buy: enhancedMap.get(targetSig) ?? targetBuy,
         slot: targetBuy.slot,
         slotOffset: targetSlotOffset,
         offsetMs: targetOffsetMs,
+        txIndex: sameSlotMaxTx + 1,
       };
       if (targetSlotOffset === 0) {
         // 同 slot：插到最后一个 slotOffset=0 条目之后
@@ -277,14 +372,17 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
     }
   }
 
-  // 8) 找出目标的 block_index
+  // 8) 找出目标的 block_index（= 块内真实执行位置，对应参考站 tx_index）
   const targetEntryIdx = ordered.findIndex((e) => e.buy.signature === targetSig);
-  const targetBlockIndex = targetEntryIdx >= 0 ? targetEntryIdx : null;
+  const targetTxIndex = targetEntryIdx >= 0 ? ordered[targetEntryIdx].txIndex : null;
+  // targetBlockIndex 保留给 block_analyses 表（语义不变，= 目标在块内的位置）。
+  // 同 slot 时就是 txIndex；target 跨 slot 时（极少见）置 null。
+  const targetBlockIndex = targetTxIndex;
 
   // 9) 给每笔打标 + 计算 offsetPos
   //
   // first_sniper 语义：目标买入之后、ordered 数组里第一个非 target 的 buyer。
-  // ordered 数组已按「同 slot 优先、blockTime 升序」排好（参考站同样的口径），
+  // ordered 数组已按「同 slot 优先、块内 txIndex 升序」排好（= 参考站口径），
   // 所以「目标之后第一个」= ordered 数组里 idx > targetEntryIdx 的第一笔。
   // 这覆盖两个常见场景：
   //   - sniper bot 紧跟目标在同 slot 买（最常见，A4Ppe / Aox6K 都属此类）
@@ -296,7 +394,7 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
       mark = 'target';
     } else if (ownSet.has(e.buy.address)) {
       mark = 'own';
-    } else if (e.slotOffset === 0 && idx < targetEntryIdx) {
+    } else if (e.slotOffset === 0 && targetEntryIdx >= 0 && idx < targetEntryIdx) {
       // 同 slot 内、目标之前
       mark = 'pre_target';
     } else {
@@ -310,8 +408,11 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
     }
 
     return {
-      blockIndex: idx,
-      offsetPos: e.slotOffset === 0 && targetBlockIndex !== null ? idx - targetBlockIndex : null,
+      // blockIndex = 块内真实执行位置（不是「同 mint buy 数组里」的位置），
+      // 对应参考站 tx_index / sniper_index。offset_pos = sniper.blockIndex - target.blockIndex。
+      blockIndex: e.txIndex,
+      offsetPos:
+        e.slotOffset === 0 && targetTxIndex !== null ? e.txIndex - targetTxIndex : null,
       // offsetMs 计算口径：
       //   - 跨 slot (slotOffset=1)：用真实 ms（同 slot blockTime 差 ≈ slot duration ≈ 400ms），这是准确的
       //   - 同 slot (slotOffset=0)：真实 ms = 0（同一 slot 共享 blockTime），
@@ -321,8 +422,8 @@ export async function analyzeBlock(slot: number, mint: string, targetSig: string
       offsetMs: (() => {
         const realMs = Math.round(e.offsetMs);
         if (realMs > 0) return realMs;
-        if (e.slotOffset === 0 && targetBlockIndex !== null) {
-          return Math.abs(idx - targetBlockIndex) * 5;
+        if (e.slotOffset === 0 && targetTxIndex !== null) {
+          return Math.abs(e.txIndex - targetTxIndex) * 5;
         }
         return realMs;
       })(),
@@ -586,12 +687,18 @@ export async function getBlockAnalysis(slot: number, mint: string): Promise<{
  *
  * 用途：UI 展开 block 时一次算完所有 buyer，不用每个点"算收益"。
  * 设计：
- *   - 并发度受 BULK_PNL_CONCURRENCY 控制（默认 4），避免对 Helius/RPC 雪崩
+ *   - 并发度受 BULK_PNL_CONCURRENCY 控制（默认 8），见下方 429 说明
  *   - 单个 buyer 失败不影响其他（catch 内 swallow + 标 'error'）
  *   - 返回结果与原 buyer 列表长度一致，按 buyer.id 顺序对齐
  *
+ * 429 / 限流防御（天然处理，不需要在这里写）：
+ *   - fetchTxViews 命中 Helius 429 会自动 fallback 到 RPC 路径，并把 _heliusDead 置 true，
+ *     后续 buyer 全程走 RPC，避免 Helius 雪崩。
+ *   - 显式并发回落只在跑出来仍慢得受不了时再用环境变量 BULK_PNL_CONCURRENCY 调小（4 / 2）。
+ *
  * 性能参考（实测）：
- *   - 20 笔 buyer × calcCopyPnl(每笔 ~3-8s) ÷ 4 并发 ≈ 15-40s
+ *   - 20 笔 buyer × calcCopyPnl(每笔 ~1-2s，FIFO 加 10 分钟窗口后) ÷ 8 并发 ≈ 5-10s
+ *   - 1 分钟内清仓的 sniper 单笔耗时 < 1s（chunk=1 即 break），整批 < 5s
  *   - 之后再访问同一个 block 直接走 DB 缓存，秒开
  */
 export interface BulkBuyerPnLProgress {
@@ -608,34 +715,20 @@ export interface BulkBuyerPnLResult {
 
 const BULK_PNL_CONCURRENCY = Math.max(
   1,
-  parseInt(process.env.BULK_PNL_CONCURRENCY || '4', 10),
+  parseInt(process.env.BULK_PNL_CONCURRENCY || '8', 10),
 );
 
-/** 把 N 个 task 按并发上限执行，onProgress 每完成一个回调一次 */
-async function runWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  worker: (item: T) => Promise<R>,
-  onProgress?: (done: number, total: number) => void,
-): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let cursor = 0;
-  let done = 0;
-  async function next(): Promise<void> {
-    const i = cursor++;
-    if (i >= items.length) return;
-    try {
-      results[i] = await worker(items[i]);
-    } finally {
-      done++;
-      onProgress?.(done, items.length);
-      await next();
-    }
-  }
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => next());
-  await Promise.all(workers);
-  return results;
-}
+/**
+ * 把 N 个 task 按并发上限执行，onProgress 每完成一个回调一次。
+ *
+ * 实现已统一抽到 ./concurrency.ts（与 analyze 路由等模块共享）。
+ * 这里保留签名 + 行为：结果数组按入参下标对齐；异常向上抛，由 worker 自己 try/catch。
+ *
+ * 429/限流防御（不需要在本函数里写）：
+ *   - 单个 worker 命中 Helius 429 时由 tx-source.ts 的 fetchTxViews 自动 fallback 到 RPC 路径，
+ *     并把 _heliusDead 设为 true，后续 buyer 自动全走 RPC，避免 Helius 雪崩。
+ *   - 显式的并发回落只在跑出来实际慢得受不了时再用环境变量 BULK_PNL_CONCURRENCY 改小。
+ */
 
 /**
  * 一次性算 block 里所有 buyer 的 PnL，写回 block_buyers。

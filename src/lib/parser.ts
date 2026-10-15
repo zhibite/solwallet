@@ -54,6 +54,12 @@ export interface ParsedBuy {
   tipSource: import('./types').TipSource | null;
   success: boolean;
   tokenAmount?: number | null;
+  /**
+   * 该笔 tx 在 block.transactions 数组里的下标（= 块内真实执行位置）。
+   * 仅 parseBlockTxs 路径会写入；Helius parseHeliusTx 路径为 undefined。
+   * 参考站口径：offset = sniper.txIndex - target.txIndex，对应块内所有 tx 的位置。
+   */
+  txIndex?: number;
 }
 
 /** 检查交易是否可能为 swap/buy */
@@ -690,7 +696,8 @@ export function parseBlockTxs(
   if (!block || !block.transactions) return [];
   const result: ParsedBuy[] = [];
 
-  for (const wrapper of block.transactions) {
+  for (let i = 0; i < block.transactions.length; i++) {
+    const wrapper = block.transactions[i];
     try {
       const { transaction, meta } = wrapper;
       if (!meta || meta.err) continue; // 失败交易
@@ -780,6 +787,10 @@ export function parseBlockTxs(
             tipSource: tipSourceVal,
             success: true,
             tokenAmount: delta,
+            // 块内真实执行位置（= wrapper 在 block.transactions 里的下标）。
+            // 参考站用这个口径算 offset；不写入会回退到「同 mint buy 数组里的位置」，
+            // 在 busy slot 里会被几十到几百笔非 buy tx 撑大。
+            txIndex: i,
           });
         }
       }

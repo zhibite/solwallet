@@ -1,96 +1,58 @@
 /**
  * Next.js 16 instrumentation
  * 在服务启动时跑一次（生产 + dev 都会跑）
- * 用作 monitor worker 启动入口
+ *
+ * 启动以下 worker：
+ *   1) runMigrations           — 启动前跑一次 schema migration
+ *   2) startPoolWorker         — 池子 BFS 归池 + 决策重算（池子页面排序需要）
+ *   3) startWsMonitor          — WebSocket 实时监控（主数据源，毫秒级）
+ *   4) startUnrealizedWorker   — 每 30s 刷新 open/partial buyer 的浮盈（【P0 修复】）
+ *
+ * 已移除（按 2026-10-15 精简决定）：
+ *   - startJitoTipRefresh    — hard-code 默认值够用，Jito 改账户靠人工
+ *   - startMonitor（轮询）   — WebSocket 已覆盖，轮询是 WS 断开的兜底
+ *                              但兜底意义不大（仍走同一个 RPC），先去掉
+ *   - startAkbotBackfillWorker — 24h 一次回填，按用户决定不需要
+ *                              akbot 历史扫描改走 scripts/backfill-akbot.ts CLI
  */
 
-const JITO_REFRESH_INTERVAL_MS = 10 * 60 * 1000; // 10 分钟
-
-async function startJitoTipRefresh() {
-  // 动态 import，避免 edge runtime 加载 + 循环依赖
-  const { refreshJitoTipAccounts } = await import('./lib/parser');
-  // 启动时立即刷一次，失败也无所谓（保持 hard-code 默认值）
-  try {
-    const r = await refreshJitoTipAccounts();
-    console.log('[jito-tip-refresh]', r);
-  } catch (err) {
-    console.warn('[jito-tip-refresh] initial refresh failed', err);
-  }
-  // 定时刷；unref 避免阻塞进程退出
-  const timer = setInterval(async () => {
-    try {
-      const r = await refreshJitoTipAccounts();
-      // ok=true 时打印；false（live empty/error）只 warn，避免日志噪音
-      if (r.ok) {
-        console.log('[jito-tip-refresh]', r);
-      } else {
-        console.warn('[jito-tip-refresh]', r);
-      }
-    } catch (err) {
-      console.warn('[jito-tip-refresh] periodic refresh failed', err);
-    }
-  }, JITO_REFRESH_INTERVAL_MS);
-  if (typeof (timer as { unref?: () => void }).unref === 'function') {
-    (timer as { unref: () => void }).unref();
-  }
-}
-
 export async function register() {
-  if (process.env.NEXT_RUNTIME === 'nodejs') {
-    // Jito tip accounts 自动刷新（启动时立即刷一次，之后每 10 分钟刷一次）。
-    // 解决：refreshJitoTipAccounts 之前是 dead code，Jito 增删 tip accounts 时会漏识别。
-    // Helius Sender / LandX / 0slot 的 tip accounts 仍走 hard-code 静态常量（这 3 家不公开 getTipAccounts）。
-    try {
-      await startJitoTipRefresh();
-    } catch (err) {
-      console.error('[instrumentation] jito tip refresh failed to start', err);
-    }
+  if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
-    // 动态 import，避免 edge runtime 加载
-    const { startMonitor } = await import('./lib/monitor');
+  // 1) 跑一次 migration（idempotent）
+  try {
     const { runMigrations } = await import('./lib/migrate');
-    try {
-      await runMigrations();
-      console.log('[instrumentation] migrations done');
-    } catch (err) {
-      console.error('[instrumentation] migration failed', err);
-    }
-    try {
-      await startMonitor();
-      console.log('[instrumentation] monitor started');
-    } catch (err) {
-      console.error('[instrumentation] monitor failed to start', err);
-    }
+    await runMigrations();
+    console.log('[instrumentation] migrations done');
+  } catch (err) {
+    console.error('[instrumentation] migration failed', err);
+  }
 
-    // 池子 worker（归池 + 决策重排，不自动晋升到监控列表）
-    try {
-      const { startPoolWorker } = await import('./lib/pool-worker');
-      await startPoolWorker();
-      console.log('[instrumentation] pool worker started');
-    } catch (err) {
-      console.error('[instrumentation] pool worker failed to start', err);
-    }
+  // 2) 池子 worker：周期 BFS 归池 + 决策重算
+  try {
+    const { startPoolWorker } = await import('./lib/pool-worker');
+    await startPoolWorker();
+    console.log('[instrumentation] pool worker started');
+  } catch (err) {
+    console.error('[instrumentation] pool worker failed to start', err);
+  }
 
-    // AKBot 池子回填 worker（每日定时扫一遍 pool_members，识别 akbot 用户）
-    try {
-      const { startAkbotBackfillWorker } = await import('./lib/akbot-backfill-worker');
-      startAkbotBackfillWorker();
-      console.log('[instrumentation] akbot backfill worker started');
-    } catch (err) {
-      console.error('[instrumentation] akbot backfill worker failed to start', err);
-    }
+  // 3) WebSocket 实时监控：logsSubscribe，毫秒级抓到第一狙击者
+  try {
+    const { startWsMonitor } = await import('./lib/ws-monitor');
+    await startWsMonitor();
+    console.log('[instrumentation] ws monitor started');
+  } catch (err) {
+    console.error('[instrumentation] ws monitor failed to start', err);
+  }
 
-    // PnL 计算：跟随 monitor.ts 的 fire-and-forget 在 saveBlockAnalysis 后立即触发，
-    // 不再启动独立进程。原 src/lib/pnl-worker.ts 已删除 —— 独立 worker 挂掉后无法
-    // 自动恢复，且容易跟主进程失同步。历史 backlog 由 scripts/backfill-block-pnl.ts 一次补齐。
-
-    // WebSocket 实时监控（毫秒级延迟，相比轮询能抓到第一狙击者）
-    try {
-      const { startWsMonitor } = await import('./lib/ws-monitor');
-      await startWsMonitor();
-      console.log('[instrumentation] ws monitor started');
-    } catch (err) {
-      console.error('[instrumentation] ws monitor failed to start', err);
-    }
+  // 4) 浮盈刷新：每 30s 扫 open/partial 行，按 hot/warm TTL 拉实时价格写入 unrealized_sol
+  //    【P0 修复】之前要求 watch -n 30 手动跑，现在改成服务启动时自动跑。
+  try {
+    const { startUnrealizedWorker } = await import('./lib/unrealized-worker');
+    await startUnrealizedWorker();
+    console.log('[instrumentation] unrealized worker started (30s tick)');
+  } catch (err) {
+    console.error('[instrumentation] unrealized worker failed to start', err);
   }
 }

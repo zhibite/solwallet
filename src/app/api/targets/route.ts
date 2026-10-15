@@ -60,6 +60,9 @@ export async function GET(req: NextRequest) {
              s.mint                    AS last_sniper_mint,
              s.block_time              AS last_sniper_block_time,
              s.first_sniper_tip_source AS last_sniper_tip_source,
+             -- 【P1-#3】目标自己在这一笔 pay 的 tip / prio，方便用户决定「跟多少 tip / prio」
+             s.target_tip_sol          AS last_target_tip_sol,
+             s.target_prio_lamports    AS last_target_prio_lamports,
              -- 跟单收益：target_trades.pnl_sol 是孤儿字段（无写入路径），
              -- 改读狙击者那笔 block_buyers.pnl_sol（=「如果跟单这个狙击者能赚多少」）
              s.sniper_pnl_sol          AS last_sniper_pnl_sol,
@@ -75,6 +78,7 @@ export async function GET(req: NextRequest) {
         SELECT t.first_sniper, t.first_sniper_signature, t.first_sniper_offset_pos,
                t.first_sniper_offset_ms, t.first_sniper_tip_sol, t.first_sniper_prio_lamports,
                t.first_sniper_buy_sol, t.slot, t.mint, t.block_time,
+               t.target_tip_sol, t.target_prio_lamports,
                bb.tip_source AS first_sniper_tip_source,
                bb.pnl_sol AS sniper_pnl_sol,
                bb.pnl_status AS sniper_pnl_status,
@@ -102,6 +106,7 @@ export async function GET(req: NextRequest) {
               last_sniper_offset_ms, last_sniper_tip_sol, last_sniper_prio_lamports,
               last_sniper_buy_sol, last_sniper_slot, last_sniper_mint, last_sniper_block_time,
               last_sniper_tip_source, last_sniper_pnl_sol,
+              last_target_tip_sol, last_target_prio_lamports,
               ...rest } = r;
       return {
         ...rest,
@@ -125,6 +130,9 @@ export async function GET(req: NextRequest) {
           total_pnl_sol: r.last_sniper_total_pnl_sol,
           current_price_sol: r.last_sniper_current_price_sol,
           price_updated_at: r.last_sniper_price_updated_at,
+          // 【P1-#3】目标自己在这一笔的 tip / prio
+          target_tip_sol: last_target_tip_sol,
+          target_prio_lamports: last_target_prio_lamports,
         },
       };
     });

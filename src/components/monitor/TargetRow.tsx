@@ -5,42 +5,7 @@ import SolAmount from "@/components/common/SolAmount";
 import RelativeTime from "@/components/common/RelativeTime";
 import { ChevronDownIcon, ChevronUpIcon } from "@/icons";
 import BlockDetailView from "@/components/block/BlockDetailView";
-
-interface Target {
-  id: number;
-  address: string;
-  label: string | null;
-  threshold_sol: string;
-  status: 'active' | 'paused';
-  record_count: number;
-  last_buy_at: string | null;
-  updated_at: string;
-  auto_follow: boolean;
-  last_sniper?: {
-    address: string;
-    signature: string;
-    offset_pos: number | null;
-    offset_ms: number | null;
-    tip_sol: string | null;
-    prio_lamports: number | null;
-    buy_sol: string | null;
-    tip_source: import('@/lib/types').TipSource | null;
-    slot: number;
-    mint: string;
-    block_time: string;
-    pnl_sol?: string | null;
-    /** open=持仓中 / closed=已平仓 / partial=部分平仓 / buy_failed=买入失败（决定 UI 用三段式还是单段） */
-    pnl_status?: string | null;
-    /** 0020: 浮盈（未实现），open/partial 才有意义；closed 时 = 0 */
-    unrealized_sol?: string | null;
-    /** 0020: 总 PnL = pnl_sol(已实现) + unrealized_sol，UI 主显示值 */
-    total_pnl_sol?: string | null;
-    /** 0020: 当前价格 SOL 单位（拉不到为 null） */
-    current_price_sol?: string | null;
-    /** 0020: 价格刷新时间（> 60s 没刷 UI 标 ~ 表示可能过期） */
-    price_updated_at?: string | null;
-  } | null;
-}
+import type { Target, TargetDecision } from "@/lib/types";
 
 interface Trade {
   id: number;
@@ -74,6 +39,12 @@ interface Trade {
   sniper_current_price_sol?: string | null;
   sniper_price_updated_at?: string | null;
   pnl_sol?: string | null;  // 兼容字段：仍保留，UI 优先用 sniper_pnl_sol
+  // 0020: 三段式（主行 JSX 用非前缀名与 last_sniper 共用；底层 API 用 sniper_* 前缀字段填充，
+  // JSX 通过可选链嗅到 undefined 时退化显示 "—"，所以这两个语义层都对得上）
+  unrealized_sol?: string | null;
+  total_pnl_sol?: string | null;
+  pnl_status?: string | null;
+  price_updated_at?: string | null;
   status: string;
   first_sniper_slot?: number | null;
   first_sniper_buyer_signature?: string | null;
@@ -100,18 +71,7 @@ interface Props {
   onThresholdChange: (id: number, val: number) => void;
   onToggleAutoFollow: (id: number, on: boolean) => void;
   firstOnly?: boolean;
-  decision?: {
-    worth_score: number | null;
-    win_rate: number;
-    avg_pnl_sol: number;
-    p50_tip_sol: number | null;
-    p50_prio_lamports: number | null;
-    p75_tip_sol: number | null;
-    p75_prio_lamports: number | null;
-    success_count: number;
-    failed_count: number;
-    sample_size: number;
-  };
+  decision?: TargetDecision;
 }
 
 export default function TargetRow({ target, onPause, onResume, onDelete, onClear, onThresholdChange, onToggleAutoFollow, firstOnly = true, decision }: Props) {
@@ -209,23 +169,28 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
         slot: target.last_sniper.slot,
         mint: target.last_sniper.mint,
         block_time: target.last_sniper.block_time,
+        // 【P1-#3】目标自己在这一笔的 tip / prio（不是狙击者的）
+        target_tip_sol: target.last_sniper.target_tip_sol,
+        target_prio_lamports: target.last_sniper.target_prio_lamports,
       }
     : latest;
 
-  const sniperFailed = !!sniper && (!sniper.first_sniper || sniper.first_sniper_offset_ms === null);
-  // 优先用 ms 差（与参考站一致 = 狙击者比目标晚多少毫秒买入）。
-  // 没记录 ms 时 fallback 到 offset_pos（块内位置差）以保持可见。
+  // 狙击者分两种状态（参考站）：
+  //   - 同 slot 抢到 (offset_pos !== null)：显示「抢到 +N」（N 可正可负；
+  //     负数 = 狙击者抢在目标之前，jito bundle 内联场景）
+  //   - 跨 slot 抢到 (offset_pos === null, sniper 存在)：只显示「下slot +Nms」徽章，
+  //     不再叠加「失败」标签 —— 「first_sniper」按定义就是「target 之后第一笔非 target 买入」，
+  //     跨 slot 不算失败，只是时机不同。
+  // 没记录 pos 时 fallback 到 offset_ms（同 slot 下 ms 不可信，但 fallback 时还是给方向）。
   const sniperOffset = (() => {
-    // 顶层 last_sniper 字段直接叫 offset_ms
-    const lastMs = target.last_sniper?.offset_ms ?? null;
-    if (lastMs != null) return Math.abs(lastMs);
-    if (sniper?.first_sniper_offset_ms != null) return Math.abs(sniper.first_sniper_offset_ms);
-    if (sniper?.first_sniper_offset_pos != null) return Math.abs(sniper.first_sniper_offset_pos);
+    if (sniper?.first_sniper_offset_pos != null) return sniper.first_sniper_offset_pos;
+    if (sniper?.first_sniper_offset_ms != null) return sniper.first_sniper_offset_ms;
     return 0;
   })();
-  // 「下slot」小标签（参考网站口径）：
-  // 在我们这里，offset_pos 跨 slot 时存为 NULL —— 等价于参考站的 slot_delta=1
-  const sniperNextSlot = sniper?.first_sniper_offset_pos == null && !!sniper?.first_sniper;
+  // 「下slot」标签 = 狙击者存在但跨 slot（offset_pos=null）
+  const sniperNextSlot = !!sniper?.first_sniper && sniper.first_sniper_offset_pos == null;
+  // 「同 slot 抢到」徽章 = 狙击者存在且有块内位置差
+  const sniperInSameSlot = !!sniper?.first_sniper && sniper.first_sniper_offset_pos != null;
 
   return (
     <>
@@ -313,18 +278,21 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
             )}
             {sniper?.first_sniper && (
               <span className="inline-flex items-center gap-0.5 shrink-0">
-                <span
-                  className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold ${
-                    sniperFailed
-                      ? 'bg-red-500/15 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-500/30'
-                      : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/30'
-                  }`}
-                >
-                  {sniperFailed ? '失败' : '抢到'} +{sniperOffset}
-                </span>
-                {sniperNextSlot && (
-                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-slate-100 dark:bg-zinc-600 text-gray-500 dark:text-gray-300 font-medium">
-                    下slot
+                {sniperInSameSlot ? (
+                  // 同 slot：块内位置差（可正可负；负数 = 抢在目标前 jito bundle 内联）
+                  <span
+                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/30"
+                    title={`狙击者块内位置差（负数 = 抢在目标之前）`}
+                  >
+                    抢到 {sniperOffset > 0 ? '+' : ''}{sniperOffset}
+                  </span>
+                ) : (
+                  // 跨 slot：fallback 到 ms 偏移（保留符号）
+                  <span
+                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 dark:bg-zinc-700 text-gray-600 dark:text-gray-300 border border-slate-200 dark:border-zinc-600 font-mono"
+                    title={`狙击者在下一个 slot 追入，时间差 ${sniperOffset}ms`}
+                  >
+                    下slot {sniperOffset > 0 ? '+' : ''}{sniperOffset}ms
                   </span>
                 )}
               </span>
@@ -355,15 +323,33 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
           </span>
         </td>
 
-        {/* 收益（第4列）：三段式 = 已实现 + 浮盈 = 总 PnL */}
+        {/* 目标 tip（第4列）【P1-#3】目标付了多少 tip，用户决定跟多少 tip 时参考 */}
+        <td className="px-3 py-3 text-right">
+          <span className="font-mono text-xs text-amber-400 dark:text-amber-500 font-semibold tabular-nums">
+            {sniper?.target_tip_sol != null
+              ? Number(sniper.target_tip_sol).toFixed(6)
+              : <span className="text-gray-300 dark:text-gray-600">—</span>}
+          </span>
+        </td>
+
+        {/* 目标 prio（第5列）【P1-#3】目标付了多少 prio fee */}
+        <td className="px-3 py-3 text-right">
+          <span className="font-mono text-xs text-purple-300 dark:text-purple-500 font-semibold tabular-nums">
+            {sniper?.target_prio_lamports != null
+              ? (Number(sniper.target_prio_lamports) / 1e9).toFixed(6)
+              : <span className="text-gray-300 dark:text-gray-600">—</span>}
+          </span>
+        </td>
+
+        {/* 收益（第6列）：三段式 = 已实现 + 浮盈 = 总 PnL */}
         <td className="px-3 py-3 text-right">
           {(() => {
             // 三段式字段（sniper 只有 last_sniper 时才有这套，未连上 sniper 时退化到 trades 表）
-            const realized = (sniper as any)?.pnl_sol != null ? parseFloat((sniper as any).pnl_sol) : null;
-            const unreal = (sniper as any)?.unrealized_sol != null ? parseFloat((sniper as any).unrealized_sol) : null;
-            const total = (sniper as any)?.total_pnl_sol != null ? parseFloat((sniper as any).total_pnl_sol) : realized;
-            const status = ((sniper as any)?.pnl_status as string | undefined) ?? null;
-            const priceUpd = (sniper as any)?.price_updated_at as string | undefined;
+            const realized = sniper?.pnl_sol != null ? parseFloat(sniper.pnl_sol) : null;
+            const unreal = sniper?.unrealized_sol != null ? parseFloat(sniper.unrealized_sol) : null;
+            const total = sniper?.total_pnl_sol != null ? parseFloat(sniper.total_pnl_sol) : realized;
+            const status = sniper?.pnl_status ?? null;
+            const priceUpd = sniper?.price_updated_at ?? null;
             // 价格 > 90s 没刷新：标 ~ 表示可能过期。
             //   注意：price_updated_at 异常（'abc' 等）时 new Date(...).getTime() = NaN，
             //   Date.now() - NaN = NaN，NaN > 90_000 = false ——会让 stale 误判为 false。
@@ -447,7 +433,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
       {/* 阈值编辑浮层（参考页用 prompt，这里用 inline input 替代） */}
       {editingThreshold && (
         <tr className="bg-blue-50/80 dark:bg-blue-500/10">
-          <td colSpan={11} className="px-3 py-2.5">
+          <td colSpan={13} className="px-3 py-2.5">
             <div className="flex items-center gap-3 text-sm">
               <span className="text-gray-500 dark:text-gray-300 font-medium">阈值 (SOL)：</span>
               <input
@@ -469,7 +455,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
       {/* ===== 第2层：买入交易列表 ===== */}
       {expanded && (
         <tr>
-          <td colSpan={12} className="px-6 py-5">
+          <td colSpan={13} className="px-6 py-5">
             {loadingTrades ? (
               <div className="flex items-center gap-2 text-xs text-gray-400 dark:text-gray-500 py-6">
                 <span className="w-4 h-4 rounded-full border-2 border-current animate-spin" style={{ borderTopColor: 'transparent' }} />
@@ -492,6 +478,8 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                       <th className="py-2.5 px-3 text-left font-semibold">第一个狙击者</th>
                       <th className="py-2.5 px-3 text-right font-semibold">tip</th>
                       <th className="py-2.5 px-3 text-right font-semibold">prio</th>
+                      <th className="py-2.5 px-3 text-right font-semibold" title="目标付的 tip">目标tip</th>
+                      <th className="py-2.5 px-3 text-right font-semibold" title="目标付的 prio fee">目标prio</th>
                       <th className="py-2.5 px-3 text-right font-semibold">跟单收益</th>
                       <th className="py-2.5 px-3 text-right font-semibold" title="同 slot + 下一 slot 买这个 token 的总笔数">买家</th>
                       <th className="py-2.5 px-3 text-center font-semibold" title="在所有跟这个目标的人里，我是第几个跟上的">我的排位</th>
@@ -501,11 +489,13 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                   </thead>
                   <tbody>
                     {trades.map((t, i) => {
-                      const snFailed = !t.first_sniper || t.first_sniper_offset_ms === null;
-                      // 优先用 ms 差（与参考站一致）
+                      const snInSameSlot = !!t.first_sniper && t.first_sniper_offset_pos != null;
+                      const snNextSlot = !!t.first_sniper && t.first_sniper_offset_pos == null;
+                      // 优先用块内位置差（与参考站一致 = 狙击者比目标在块内晚几笔 tx，
+                      // 负数 = jito bundle 内联抢在目标前）。fallback 到 offset_ms 时保留符号。
                       const snOffset = (() => {
-                        if (t.first_sniper_offset_ms != null) return Math.abs(t.first_sniper_offset_ms);
-                        if (t.first_sniper_offset_pos != null) return Math.abs(t.first_sniper_offset_pos);
+                        if (t.first_sniper_offset_pos != null) return t.first_sniper_offset_pos;
+                        if (t.first_sniper_offset_ms != null) return t.first_sniper_offset_ms;
                         return 0;
                       })();
                       const competitorCount = (t.same_slot_count ?? 0) + (t.next_slot_count ?? 0);
@@ -546,19 +536,21 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                             {t.first_sniper ? (
                               <div className="flex items-center gap-1.5">
                                 <AddressCopy address={t.first_sniper} length={4} />
-                                <span
-                                  className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold ${
-                                    snFailed
-                                      ? 'bg-red-500/15 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-500/30'
-                                      : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/30'
-                                  }`}
-                                >
-                                  {snFailed ? '失败' : '抢到'} +{snOffset}
-                                </span>
-                                {/* 下slot 小标签（参考网站口径：offset_pos 跨 slot 时为 null） */}
-                                {t.first_sniper_offset_pos == null && !snFailed && (
-                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-slate-100 dark:bg-zinc-600 text-gray-500 dark:text-gray-300 font-medium">
-                                    下slot
+                                {snInSameSlot ? (
+                                  // 同 slot：块内位置差
+                                  <span
+                                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/30"
+                                    title="狙击者块内位置差（负数 = 抢在目标之前）"
+                                  >
+                                    抢到 {snOffset > 0 ? '+' : ''}{snOffset}
+                                  </span>
+                                ) : (
+                                  // 跨 slot：fallback 到 ms 偏移
+                                  <span
+                                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 dark:bg-zinc-700 text-gray-600 dark:text-gray-300 border border-slate-200 dark:border-zinc-600 font-mono"
+                                    title={`狙击者在下一个 slot 追入，时间差 ${snOffset}ms`}
+                                  >
+                                    下slot {snOffset > 0 ? '+' : ''}{snOffset}ms
                                   </span>
                                 )}
                               </div>
@@ -573,6 +565,16 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                           <td className="py-2 px-3 text-right font-mono text-purple-600 dark:text-purple-400 tabular-nums">
                             {t.first_sniper_prio_lamports != null
                               ? (Number(t.first_sniper_prio_lamports) / 1e9).toFixed(6)
+                              : <span className="text-gray-300 dark:text-gray-600">—</span>}
+                          </td>
+                          <td className="py-2 px-3 text-right font-mono text-amber-400 dark:text-amber-500 tabular-nums">
+                            {t.target_tip_sol != null
+                              ? Number(t.target_tip_sol).toFixed(6)
+                              : <span className="text-gray-300 dark:text-gray-600">—</span>}
+                          </td>
+                          <td className="py-2 px-3 text-right font-mono text-purple-300 dark:text-purple-500 tabular-nums">
+                            {t.target_prio_lamports != null
+                              ? (Number(t.target_prio_lamports) / 1e9).toFixed(6)
                               : <span className="text-gray-300 dark:text-gray-600">—</span>}
                           </td>
                           {(() => {
@@ -658,7 +660,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                         // ===== 第3层：内嵌于第2层内部的 block 级买家分布（手风琴展开行） =====
                         isThisTradeExpanded && (
                           <tr key={`detail-${t.id}`} className="bg-gradient-to-r from-slate-50 to-blue-50/30 dark:from-zinc-700/30 dark:to-blue-500/10 border-b border-gray-200 dark:border-gray-700">
-                            <td colSpan={12} className="px-5 py-4">
+                            <td colSpan={14} className="px-5 py-4">
                               <div className="flex items-center justify-between mb-2">
                                 <div className="flex items-center gap-2">
                                   <span className="w-1.5 h-1.5 rounded-full bg-brand-500" />
