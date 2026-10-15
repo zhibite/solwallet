@@ -6,7 +6,6 @@
  *   1) runMigrations           — 启动前跑一次 schema migration
  *   2) startPoolWorker         — 池子 BFS 归池 + 决策重算（池子页面排序需要）
  *   3) startWsMonitor          — WebSocket 实时监控（主数据源，毫秒级）
- *   4) startUnrealizedWorker   — 每 30s 刷新 open/partial buyer 的浮盈（【P0 修复】）
  *
  * 已移除（按 2026-10-15 精简决定）：
  *   - startJitoTipRefresh    — hard-code 默认值够用，Jito 改账户靠人工
@@ -14,6 +13,7 @@
  *                              但兜底意义不大（仍走同一个 RPC），先去掉
  *   - startAkbotBackfillWorker — 24h 一次回填，按用户决定不需要
  *                              akbot 历史扫描改走 scripts/backfill-akbot.ts CLI
+ *   - startUnrealizedWorker  — 浮盈功能砍掉后不再需要 30s 拉价刷新
  */
 
 export async function register() {
@@ -44,15 +44,5 @@ export async function register() {
     console.log('[instrumentation] ws monitor started');
   } catch (err) {
     console.error('[instrumentation] ws monitor failed to start', err);
-  }
-
-  // 4) 浮盈刷新：每 30s 扫 open/partial 行，按 hot/warm TTL 拉实时价格写入 unrealized_sol
-  //    【P0 修复】之前要求 watch -n 30 手动跑，现在改成服务启动时自动跑。
-  try {
-    const { startUnrealizedWorker } = await import('./lib/unrealized-worker');
-    await startUnrealizedWorker();
-    console.log('[instrumentation] unrealized worker started (30s tick)');
-  } catch (err) {
-    console.error('[instrumentation] unrealized worker failed to start', err);
   }
 }

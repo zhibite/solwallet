@@ -1,5 +1,13 @@
 -- 0020: 持仓的未实现 PnL（浮盈）
 --
+-- ⚠️ 2026-10-15 浮盈功能已砍掉（pnl.ts 顶部说明）。
+--   列定义保留，不再写入；/api/* 也不再透传这三个字段。
+--   弃用原因：跟单收益的核心是已实现 PnL = 钱包 SOL/wSOL 余额差，
+--   浮盈要拉 DexScreener/Birdeye 外部价 → 30s 定时 + 429 限流 + 价格漂移
+--   等问题对「实盘跟单」价值不抵成本。
+--   这 4 列保留是给将来重新打开浮盈的兜底，不用再 ALTER。
+--   解除方式：DELETE FROM block_buyers WHERE price_updated_at IS NOT NULL 之类。
+--
 -- 背景：
 --   之前 block_buyers 只记了已实现 PnL（pnl_sol / pnl_status / pnl_sold_ratio），
 --   遇到 status='open'（一笔都没卖）或 status='partial'（卖了一部分）的行，UI 只能

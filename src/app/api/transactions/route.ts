@@ -61,11 +61,8 @@ export async function GET(req: NextRequest) {
            b_first.pnl_sol::text AS sniper_pnl_sol,
            b_first.pnl_status AS sniper_pnl_status,
            b_first.pnl_sold_ratio::text AS sniper_pnl_sold_ratio,
-           -- 0020: 未实现 PnL（浮盈）
-           b_first.unrealized_sol::text AS sniper_unrealized_sol,
-           b_first.total_pnl_sol::text AS sniper_total_pnl_sol,
-           b_first.current_price_sol::text AS sniper_current_price_sol,
-           b_first.price_updated_at AS sniper_price_updated_at,
+           -- 0020 浮盈字段已下线（2026-10-15）：不再透传 sniper_unrealized_* / sniper_total_pnl_sol / sniper_current_price_sol / sniper_price_updated_at。
+           -- 浮盈链路不再写入 price 4 列，这几列永远是 NULL。
            b_own.block_index AS my_block_index,
            b_own.tip_sol::text AS my_tip_sol,
            b_own.prio_lamports AS my_prio_lamports,

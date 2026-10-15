@@ -14,7 +14,7 @@ import { query, queryOne, withTransaction } from './db';
 import { getHelius, isHeliusConfigured, parsedEventItemToEnhanced, type ParsedEventItem } from './helius';
 import { getMultiRpc } from './multi-rpc';
 import { parseHeliusTx } from './parser';
-import { saveBlockAnalysis, computeBulkBuyerPnL, applyFirstSniperToTarget, prefillOpenUnrealized } from './first-sniper';
+import { saveBlockAnalysis, computeBulkBuyerPnL, applyFirstSniperToTarget } from './first-sniper';
 import { quickAkbotCheck, isAkbotCircuitOpen } from './akbot';
 import { markAsAkbot } from './pool';
 
@@ -286,33 +286,12 @@ export async function ingestTargetTrade(targetId: number, buy: any, rawTx: any) 
         : new Date().toISOString();
       await saveBlockAnalysis(buy.slot, buy.mint, buy.signature, blockTime, analyzeResult);
 
-      // 【提速 ①】立即给「有 token + 未平仓」的 buyer 落一份浮盈。
-      //   monitor.ts / ws-monitor.ts / re-analyze 三条路径都走这里，否则监控页
-      //   「跟单收益」列要等 unrealized-worker 30s tick 才有数据。
-      //   顺序：先于 computeBulkBuyerPnL 触发，但不 await —— bulk 看到 pnl_status='open' 的 follower 会跳过 FIFO。
-      setImmediate(() => {
-        prefillOpenUnrealized(buy.slot, buy.mint)
-          .then((r) => {
-            if (r.written === 0 && r.reason === 'no eligible buyers') return;
-            console.log(
-              `[monitor] prefill open slot=${buy.slot} mint=${buy.mint.slice(0, 8)}... written=${r.written} skipped=${r.skipped} (${r.reason})`,
-            );
-          })
-          .catch((e) =>
-            console.warn(
-              `[monitor] prefill open failed slot=${buy.slot}:`,
-              (e as Error)?.message ?? e,
-            ),
-          );
-      });
-
       // 立即算本 block 所有 buyer 的 PnL（不等独立 worker 兜底）：
       //   - block_buyers 刚由 saveBlockAnalysis 写好，pnl_sol=NULL
-      //   - 提速 ①：上面的 setImmediate(prefillOpenUnrealized) 已经把所有 token>0 的行
-      //     标成 pnl_status='open' 并写入浮盈；提速 ②：filter 跳过 follower / pre_target
-      //     的 'open' 行（FIFO 翻签名页在没卖出的情况下是纯浪费）。
+      //   - filter 跳过 follower / pre_target 的 'open' 行（FIFO 翻签名页在没卖出的情况下是纯浪费）
       //   - 真正 fire-and-forget：再包一层 setImmediate，不阻塞后面的 first_sniper 回填 / pool scan / akbot
       //   - 历史 backlog（worker 卡在 456738961 之前的那批）由 scripts/backfill-block-pnl.ts 一次补齐
+      // 浮盈功能 2026-10-15 砍掉后，prefillOpenUnrealized 整段移除。
       setImmediate(() => {
         computeBulkBuyerPnL(buy.slot, buy.mint)
           .then((r) => {

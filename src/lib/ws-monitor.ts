@@ -16,9 +16,9 @@
  */
 
 import { Connection, Context, PublicKey } from '@solana/web3.js';
-import { query } from './db';
+import { query, queryOne } from './db';
 import { parseHeliusTx, solanaTxToHeliusEnhanced } from './parser';
-import { saveBlockAnalysis, applyFirstSniperToTarget, computeBulkBuyerPnL, prefillOpenUnrealized } from './first-sniper';
+import { saveBlockAnalysis, applyFirstSniperToTarget, computeBulkBuyerPnL } from './first-sniper';
 import { scanForTarget } from './pool';
 import { quickAkbotCheck, isAkbotCircuitOpen } from './akbot';
 import { markAsAkbot } from './pool';
@@ -523,7 +523,9 @@ async function subscribeToPumpFun() {
  */
 async function handlePumpFunLogs(
   logs: any,
-  context: { slot: number; signature: string },
+  // web3.js onLogs 回调里 context 是 @solana/web3.js 的 Context 类型（只带 slot），
+  // signature 在 logs (LogInfo) 上，下面用 `const sig = logs.signature` 取。
+  context: Context,
 ) {
   recordHeartbeat(); // 记录心跳，表明订阅活跃
   try {
@@ -950,7 +952,7 @@ async function ingestWsTrade(targetId: number, buy: any, rawTx: any) {
   const { analyzeBlock } = await import('./first-sniper');
 
   // 1) 写 target_trades
-  const inserted = await query<{ id: number; was_inserted: boolean }>(`
+  const inserted = await queryOne<{ id: number; was_inserted: boolean }>(`
     INSERT INTO target_trades (
       target_id, signature, slot, block_time, mint, target_address,
       buy_sol, target_tip_sol, target_prio_lamports, is_bundled, version,
@@ -1027,26 +1029,9 @@ async function ingestWsTrade(targetId: number, buy: any, rawTx: any) {
         : new Date().toISOString();
       await saveBlockAnalysis(buy.slot, buy.mint, buy.signature, blockTime, analyzeResult);
 
-      // 【提速 ①】与 monitor.ts 保持一致：立即给「有 token + 未平仓」的 buyer 落一份浮盈。
-      //   监控页「跟单收益」列不用等 unrealized-worker 30s tick 才有数字。
-      setImmediate(() => {
-        prefillOpenUnrealized(buy.slot, buy.mint)
-          .then((r) => {
-            if (r.written === 0 && r.reason === 'no eligible buyers') return;
-            console.log(
-              `[ws-monitor] prefill open slot=${buy.slot} mint=${buy.mint.slice(0, 8)}... written=${r.written} skipped=${r.skipped} (${r.reason})`,
-            );
-          })
-          .catch((e) =>
-            console.warn(
-              `[ws-monitor] prefill open failed slot=${buy.slot}:`,
-              (e as Error)?.message ?? e,
-            ),
-          );
-      });
-
       // 【P0 修复】立即算本 block 所有 buyer 的 PnL（fire-and-forget，不阻塞后面的 sniper 回填 / pool scan / akbot）
       // 与 monitor.ts:295-308 保持完全一致；WS 路径之前漏掉了导致 sniper_pnl_sol 永远是 NULL。
+      // 浮盈功能 2026-10-15 砍掉后，prefillOpenUnrealized 整段移除。
       setImmediate(() => {
         computeBulkBuyerPnL(buy.slot, buy.mint)
           .then((r) => {

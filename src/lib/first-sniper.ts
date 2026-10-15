@@ -10,7 +10,8 @@ import { runWithConcurrency } from './concurrency';
 import { getHelius, parsedEventItemToEnhanced } from './helius';
 import { getRPC } from './solana-rpc';
 import { parseHeliusTx, parseBlockTxs, calcBuySol, findInboundTransfer, type ParsedBuy } from './parser';
-import { calcCopyPnl, enrichWithUnrealized } from './pnl';
+import { calcCopyPnl } from './pnl';
+// getEnrichableBuyerWithPrice 不再需要 —— 浮盈链路已整体下线（2026-10-15）。
 import type { BlockBuyer } from './types';
 
 // ============ 改动 1：slot 进度跟踪（替代盲目 getBlock 轮询）============
@@ -823,122 +824,6 @@ const BULK_PNL_CONCURRENCY = Math.max(
 );
 
 /**
- * 【提速 ①】在 analyzeBlock 写完 block_buyers 之后立即给「有 token + 未平仓」的 buyer
- *   落一份浮盈（pnl_status='open'，unrealized_sol / total_pnl_sol 按当前价算）。
- *
- * 目的：
- *   监控页主行 / 第 2 层展开行的「跟单收益」列，原本要等 unrealized-worker 30s tick
- *   才有数据；这里在 analyzeBlock 完成瞬间再落一次，1-2s 内就能看见一个「* + 浮盈」数字。
- *   跟单者最关心的是**第一个狙击者**的浮盈（L1 last_sniper / L2 跟单收益 都来自 b_first），
- *   所以对全 block 的 token>0 buyer 全部落一次 —— follower 也覆盖到，省得 L3 block 详情
- *   还要再等。
- *
- * 与 computeBulkBuyerPnL 的边界：
- *   - 这里**不写** pnl_sol（已实现）—— 那必须跑 FIFO 配对，由后续 computeBulkBuyerPnL 兜底
- *   - 不动已经 closed / buy_failed 的行（不该把已经盖棺的总 PnL 改回浮盈）
- *   - 价格拉不到时（current_price_sol=null）写 price_updated_at=1970，unrealized-worker
- *     下个 tick 立即重试
- *   - 不会和 unrealized-worker 抢：worker 按 price_updated_at TTL（hot 15s / warm 60s）刷新，
- *     我们写完后 worker 下次 tick 看到的 ts 离自己很近，会跳过；30s 后才刷一次，覆盖为更新的价
- *
- * 调用方：monitor.ts / ws-monitor.ts 在 saveBlockAnalysis 之后、setImmediate(computeBulkBuyerPnL)
- *   之前再套一层 setImmediate 触发；不影响主链路延迟。
- */
-export async function prefillOpenUnrealized(
-  slot: number,
-  mint: string,
-): Promise<{ written: number; skipped: number; reason: string }> {
-  const got = await getBlockAnalysis(slot, mint);
-  if (!got) return { written: 0, skipped: 0, reason: 'no block analysis' };
-  const { buyers } = got;
-
-  // 筛选：必须有 token_amount 才能算浮盈；已经 close 的不动；buy_failed 的也不动
-  const targets = buyers.filter((b) => {
-    if (!b.token_amount || Number(b.token_amount) <= 0) return false;
-    if (b.result === 'failed') return false;
-    if (b.pnl_status === 'closed' || b.pnl_status === 'buy_failed') return false;
-    return true;
-  });
-
-  if (targets.length === 0) {
-    return { written: 0, skipped: buyers.length, reason: 'no eligible buyers' };
-  }
-
-  // 与 computeBulkBuyerPnL 走同一个 runWithConcurrency：避免顺序调价格 API 拖慢到 5-15s。
-  // 同一 mint 的所有 buyer 拿的是同一个 token 当前价，并发不会让上游价格 API 多打几倍。
-  // 默认 8 并发；上游 DexScreener/Birdeye 限流时由 enrichWithUnrealized 内部 try/catch 兜住（返回 null 价）。
-  const PREFILL_CONCURRENCY = 8;
-  const outcomes = await runWithConcurrency(
-    targets,
-    PREFILL_CONCURRENCY,
-    async (b): Promise<{ ok: boolean }> => {
-      try {
-        // 注意：bulk pnl 可能先于本函数跑完（两边都是 setImmediate 触发，顺序不保证），
-        //   此时 b.pnl_sol / b.pnl_status / b.pnl_sold_ratio 都可能已经有值。
-        //   必须把这些值都透传给 enrichWithUnrealized，否则：
-        //   - 'partial' 状态传 pnl_sol=null → 漏掉已实现部分（realized=0）
-        //   - 'partial' 状态传 pnl_sold_ratio=0 → 浮盈按全仓算（虚高）
-        const soldRatio =
-          b.pnl_status === 'partial' && b.pnl_sold_ratio != null
-            ? Number(b.pnl_sold_ratio)
-            : 0;
-        const pnlSolForCalc = b.pnl_sol != null ? Number(b.pnl_sol) : null;
-        const e = await enrichWithUnrealized({
-          mint,
-          token_amount: b.token_amount,
-          buy_sol: b.buy_sol ?? '0',
-          buy_fee_lamports: null,
-          pnl_sol: pnlSolForCalc,
-          pnl_sold_ratio: soldRatio,
-          pnl_status: b.pnl_status ?? 'open',
-        });
-        // 把浮盈三件套 + pnl_status 一次写完（一个 UPDATE），避免「写完浮盈但 pnl_status 没设上」
-        //   的中间态。
-        // WHERE 同时允许 pnl_status = 'open'：bulk pnl 先跑完时会把 sniper / own 标成 'open'，
-        //   prefill 后跑仍需要写浮盈（不能因为 status 已被 set 就跳过），
-        //   否则 UI 短暂显示「实+0.000 + 浮-」要等 30s unrealized-worker 才修复。
-        //   'partial' / 'closed' / 'buy_failed' 仍然排除：
-        //   - 'partial' 由 writeBack SQL 的 COALESCE 表达式保持 total 准确（pnl_sol + unrealized_sol），
-        //     prefill 再写会覆盖 total_pnl_sol，丢失 realized 部分
-        //   - 'closed' / 'buy_failed' 持仓归零，写浮盈没意义
-        // SET pnl_status 写 'open' 对 status='open' 的行是无害 no-op；对 NULL 的行相当于「兜底 open」。
-        // 价格拉不到时（current_price_sol=null）写 price_updated_at=1970，让 unrealized-worker
-        //   下个 tick 立即重试（与 writeUnrealizedToBlockBuyer 行为一致）。
-        const ts =
-          e.current_price_sol == null ? new Date(0) : e.price_updated_at;
-        await execute(
-          `UPDATE block_buyers
-              SET current_price_sol = $1,
-                  unrealized_sol    = $2,
-                  total_pnl_sol     = $3,
-                  price_updated_at  = $4,
-                  pnl_status        = 'open'
-            WHERE id = $5
-              AND (pnl_status IS NULL OR pnl_status = 'open')`,
-          [
-            e.current_price_sol,
-            e.unrealized_sol,
-            e.total_pnl_sol,
-            ts,
-            b.id,
-          ],
-        );
-        return { ok: true };
-      } catch (err: any) {
-        console.warn(
-          `[prefill-open] slot=${slot} mint=${mint.slice(0, 8)} buyer=${b.id} 失败:`,
-          err?.message ?? err,
-        );
-        return { ok: false };
-      }
-    },
-  );
-
-  const written = outcomes.filter((o) => o.ok).length;
-  return { written, skipped: buyers.length - targets.length, reason: 'ok' };
-}
-
-/**
  * 把 N 个 task 按并发上限执行，onProgress 每完成一个回调一次。
  *
  * 实现已统一抽到 ./concurrency.ts（与 analyze 路由等模块共享）。
@@ -969,8 +854,9 @@ export async function computeBulkBuyerPnL(
   //   - 目标 / 我的账号 / 第一个狙击者：永远 FIFO 算（用户最想看的核心三方）
   //   - 失败 tx：跳过（pnl_status='buy_failed' 已经写死了）
   //   - 其他人 follower / pre_target：第一次进入（pnl_status NULL）时跑；
-  //     进入 pnl_status='open' 后跳过 FIFO —— 没卖出 = 没 realized = 跑也是白跑，
-  //     浮盈已经由 prefillOpenUnrealized / unrealized-worker 兜底。
+  //     之后 pnl_status='open' 的：没卖出 = 没 realized = 跑也是白跑，
+  //     直接跳过（2026-10-15 砍掉浮盈后，open 跟随单者没有浮盈兜底刷新，
+  //     要 partial/closed 只能等用户手动点 /api/.../buyer/[id]/pnl）。
   //   - 都覆盖不到的：按现有规则（pnl_status NULL = 第一次进入）跑一次
   const toCompute = buyers.filter((b) => {
     if (opts.force) return true;
@@ -1004,33 +890,14 @@ export async function computeBulkBuyerPnL(
           buyBlockTime: blockTime,
           buyTokenAmount: tokenAmount,
         });
-        // 写回 DB
-        // 注意：
-        //   - close / buy_failed 时清掉浮盈三件套（prefill 留下的过期值），total = realized
-        //   - open / partial 时 total = realized + unrealized（unrealized_sol 可能是 prefill 写的、
-        //     也可能是 null —— null 时 COALESCE 把 total 退化为 realized，UI 短暂显示「算中」，
-        //     等 unrealized-worker 下个 tick 修复）。不要在 partial 时保留 prefill 的旧 total
-        //     （那会按全仓浮盈算，漏掉 realized 部分并虚高）
+        // 写回 DB：只写 4 个 pnl 字段 + token_amount 兜底。
+        // 0020 浮盈 4 列不再触碰（保持上次值或 NULL），monitor.ts / ws-monitor.ts 也不再触发 prefill。
         await execute(
           `UPDATE block_buyers
-              SET pnl_sol = $1, pnl_status = $2, pnl_sold_ratio = $3, token_amount = COALESCE($4, token_amount),
-                  unrealized_sol = CASE
-                    WHEN $2 IN ('closed', 'buy_failed') THEN 0
-                    ELSE unrealized_sol
-                  END,
-                  total_pnl_sol  = CASE
-                    WHEN $2 IN ('closed', 'buy_failed') THEN $1
-                    ELSE COALESCE($1, 0) + COALESCE(unrealized_sol, 0)
-                  END,
-                  -- 关闭后价格不再需要（UI 不会再用）
-                  current_price_sol = CASE
-                    WHEN $2 IN ('closed', 'buy_failed') THEN NULL
-                    ELSE current_price_sol
-                  END,
-                  price_updated_at  = CASE
-                    WHEN $2 IN ('closed', 'buy_failed') THEN NULL
-                    ELSE price_updated_at
-                  END
+              SET pnl_sol          = $1,
+                  pnl_status       = $2,
+                  pnl_sold_ratio   = $3,
+                  token_amount     = COALESCE($4, token_amount)
             WHERE id = $5`,
           [r.pnlSol, r.status, r.soldRatio, tokenAmount, buyer.id],
         );

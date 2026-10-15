@@ -244,14 +244,6 @@ export interface TargetLastSniper {
   pnl_status: string | null;
   /** 已卖出比例 0~1（老版字段，0020 后继续保留） */
   pnl_sold_ratio: string | null;
-  /** 0020: 浮盈（未实现），open/partial 才有意义；closed 时 = 0 */
-  unrealized_sol: string | null;
-  /** 0020: 总 PnL = pnl_sol(已实现) + unrealized_sol，UI 主显示值 */
-  total_pnl_sol: string | null;
-  /** 0020: 当前价格 SOL 单位（拉不到为 null） */
-  current_price_sol: string | null;
-  /** 0020: 价格刷新时间（> 60s 没刷 UI 标 ~ 表示可能过期） */
-  price_updated_at: string | null;
 }
 
 /** 跟单决策聚合（由后端 /api/targets 一起返回） */

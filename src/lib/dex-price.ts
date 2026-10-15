@@ -1,32 +1,75 @@
 /**
- * 代币价格查询服务
+ * 代币 USD 价格查询
  * 优先级：DexScreener（免费） -> Birdeye（付费，限额较高）-> Redis 缓存
  *
- * 用于：
- * - 跟单收益计算
- * - 一键确认目标（按 PnL 排序）
+ * 历史：原本提供 getTokenPriceSol / prefetchTokensPriceUsd 给浮盈链路用。
+ *   2026-10-15 砍掉浮盈后只剩 USD 单价查 + SOL/USD 汇率两个原子能力，
+ *   用在哪里是调用方决定，这里不再做单位换算也不做批量。
+ *
+ * 仍保留同 mint 并发去重 + 429 冷却 + 30s 正负缓存，是因为这两个能力
+ * 可能在未来「按 USD 价排序目标 / 池子估值」等场景用上；移除只是删接口，
+ * 不动 30s 缓存键和 inflight 跟踪。
  */
 
 import axios from 'axios';
 import { Cache, cacheKeys } from './cache';
 
+// ─── 同 mint 并发去重 ────────────────────────────────────────────────────────
+const inflightPrice = new Map<string, Promise<number | null>>();
+
+// 限流状态：mint 维度。触发 429/503 后把 mint 锁一段时间，期间所有调用直接返回 null。
+const rateLimitedMint = new Map<string, number>(); // mint → unlockAt (ms)
+const RATE_LIMIT_TTL_MS = 60_000;
+const NEG_CACHE_TTL_SEC = 30;
+
+function isCooldown(mint: string): boolean {
+  const until = rateLimitedMint.get(mint);
+  if (until == null) return false;
+  if (Date.now() < until) return true;
+  rateLimitedMint.delete(mint);
+  return false;
+}
+
+function markCooldown(mint: string, ms = RATE_LIMIT_TTL_MS): void {
+  rateLimitedMint.set(mint, Date.now() + ms);
+}
+
+function isRateLimitError(err: any): boolean {
+  if (err?.response?.status === 429 || err?.response?.status === 503) return true;
+  return /429|503|504/.test(String(err?.message ?? err));
+}
+
 export async function getTokenPriceUsd(mint: string): Promise<number | null> {
-  return Cache.wrap<number | null>(
-    cacheKeys.tokenPrice(mint),
-    30, // 30s 缓存
-    async () => {
-      // DexScreener（2s timeout，1s connect）
+  if (isCooldown(mint)) return null;
+
+  const existing = inflightPrice.get(mint);
+  if (existing) return existing;
+
+  const p = (async () => {
+    try {
+      const cached = await Cache.get<number>(cacheKeys.tokenPrice(mint));
+      if (cached != null && cached > 0) return cached;
+
+      const negCached = await Cache.get<true>(cacheKeys.tokenPrice(mint) + ':null');
+      if (negCached === true) return null;
+
+      let rateLimited = false;
       try {
         const { data } = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, {
           timeout: 2000,
         });
         const pair = data?.pairs?.[0];
-        if (pair?.priceUsd) return parseFloat(pair.priceUsd);
-      } catch {
-        // fallthrough
+        if (pair?.priceUsd) {
+          const v = parseFloat(pair.priceUsd);
+          if (v > 0) {
+            await Cache.set(cacheKeys.tokenPrice(mint), v, 30);
+            return v;
+          }
+        }
+      } catch (err: any) {
+        if (isRateLimitError(err)) rateLimited = true;
       }
 
-      // Birdeye（2s timeout）
       const birdeyeKey = process.env.BIRDEYE_API_KEY;
       if (birdeyeKey) {
         try {
@@ -35,72 +78,68 @@ export async function getTokenPriceUsd(mint: string): Promise<number | null> {
             headers: { 'X-API-KEY': birdeyeKey, 'x-chain': 'solana' },
             timeout: 2000,
           });
-          if (data?.data?.value) return data.data.value as number;
-        } catch {
-          // ignore
+          if (data?.data?.value) {
+            const v = data.data.value as number;
+            if (v > 0) {
+              await Cache.set(cacheKeys.tokenPrice(mint), v, 30);
+              return v;
+            }
+          }
+        } catch (err: any) {
+          if (isRateLimitError(err)) rateLimited = true;
         }
       }
 
+      if (rateLimited) {
+        markCooldown(mint);
+        await Cache.set(cacheKeys.tokenPrice(mint) + ':null', true, 90);
+        console.warn(`[dex-price] ${mint.slice(0, 8)} 限流,冷却 60s`);
+      } else {
+        await Cache.set(cacheKeys.tokenPrice(mint) + ':null', true, NEG_CACHE_TTL_SEC);
+      }
       return null;
-    },
-  );
+    } finally {
+      inflightPrice.delete(mint);
+    }
+  })();
+
+  inflightPrice.set(mint, p);
+  return p;
 }
 
 /**
- * 当前 SOL 对 USD 的价格（30s 缓存）。
- * 单一来源 = Birdeye 公开接口（SOL 是 base token，单独查询比 DexScreener 稳定）。
- * 用于：把 token 的 USD 价格折算成 SOL 单位，避免跟单收益误用美元数。
- *
- * 缓存 key 独立于 tokenPrice(mint)：如果用 cacheKeys.tokenPrice('SOL') 会和
- *   getTokenPriceUsd('SOL') 撞 key，万一某天有人误用 wrapped SOL 做 token 查询，
- *   就会把 SOL 汇率 token 价格互串。用独立命名空间避免这种隐式耦合。
+ * SOL 对 USD 汇率，30s 缓存。
+ * Birdeye 公开接口（独立 key 命名空间避免和 tokenPrice 互串）。
  */
+let solUsdInflight: Promise<number> | null = null;
 export async function getSolPriceUsd(): Promise<number> {
-  return Cache.wrap<number>(
-    'price:usd-sol',  // 独立 key，不与 tokenPrice 撞
-    30,
-    async () => {
-      try {
-        const { data } = await axios.get(`https://public-api.birdeye.so/defi/price`, {
-          params: { address: 'So11111111111111111111111111111111111111112' },
-          timeout: 2000,
-        });
-        const v = data?.data?.value;
-        if (typeof v === 'number' && v > 0) return v;
-      } catch {
-        // ignore
-      }
-      // 兜底：CoinGecko
-      try {
-        const { data } = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
-          params: { ids: 'solana', vs_currencies: 'usd' },
-          timeout: 2000,
-        });
-        const v = data?.solana?.usd;
-        if (typeof v === 'number' && v > 0) return v;
-      } catch {
-        // ignore
-      }
-      // 最末兜底：最近一次成功值（避免 cron 全断时所有数显示 null）
-      return 150;
-    },
-  );
-}
-
-/**
- * 当前 token 的 SOL 单价（= USD / SOL_USD）。
- *
- * 返回 null 的场景：token USD 拉不到（无流动性），或除零（不会发生）。
- *
- * 这个函数才是「拿来落库到 block_buyers.current_price_sol」的接口。
- * 把 USD/SOL 转换包在这里，让上层专心处理浮盈算术、不用关心单位。
- */
-export async function getTokenPriceSol(mint: string): Promise<number | null> {
-  const usd = await getTokenPriceUsd(mint);
-  if (usd == null || usd <= 0) return null;
-  const solUsd = await getSolPriceUsd();
-  if (solUsd <= 0) return null;
-  return usd / solUsd;
+  if (solUsdInflight) return solUsdInflight;
+  solUsdInflight = Cache.wrap<number>('price:usd-sol', 30, async () => {
+    try {
+      const { data } = await axios.get(`https://public-api.birdeye.so/defi/price`, {
+        params: { address: 'So11111111111111111111111111111111111111112' },
+        timeout: 2000,
+      });
+      const v = data?.data?.value;
+      if (typeof v === 'number' && v > 0) return v;
+    } catch {
+      // ignore
+    }
+    try {
+      const { data } = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
+        params: { ids: 'solana', vs_currencies: 'usd' },
+        timeout: 2000,
+      });
+      const v = data?.solana?.usd;
+      if (typeof v === 'number' && v > 0) return v;
+    } catch {
+      // ignore
+    }
+    return 150;
+  }).finally(() => {
+    solUsdInflight = null;
+  });
+  return solUsdInflight;
 }
 
 /** 清除价格缓存 */

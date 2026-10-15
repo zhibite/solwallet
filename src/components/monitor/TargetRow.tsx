@@ -33,18 +33,8 @@ interface Trade {
   sniper_pnl_sol?: string | null;
   sniper_pnl_status?: string | null;
   sniper_pnl_sold_ratio?: string | null;
-  // 0020: 三段式
-  sniper_unrealized_sol?: string | null;
-  sniper_total_pnl_sol?: string | null;
-  sniper_current_price_sol?: string | null;
-  sniper_price_updated_at?: string | null;
   pnl_sol?: string | null;  // 兼容字段：仍保留，UI 优先用 sniper_pnl_sol
-  // 0020: 三段式（主行 JSX 用非前缀名与 last_sniper 共用；底层 API 用 sniper_* 前缀字段填充，
-  // JSX 通过可选链嗅到 undefined 时退化显示 "—"，所以这两个语义层都对得上）
-  unrealized_sol?: string | null;
-  total_pnl_sol?: string | null;
   pnl_status?: string | null;
-  price_updated_at?: string | null;
   status: string;
   first_sniper_slot?: number | null;
   first_sniper_buyer_signature?: string | null;
@@ -160,11 +150,6 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
         first_sniper_tip_sol: target.last_sniper.tip_sol,
         first_sniper_prio_lamports: target.last_sniper.prio_lamports,
         pnl_sol: target.last_sniper.pnl_sol,
-        // 0020: 浮盈 + 总 PnL 三段式
-        unrealized_sol: target.last_sniper.unrealized_sol ?? null,
-        total_pnl_sol: target.last_sniper.total_pnl_sol ?? null,
-        current_price_sol: target.last_sniper.current_price_sol ?? null,
-        price_updated_at: target.last_sniper.price_updated_at ?? null,
         pnl_status: target.last_sniper.pnl_status ?? null,
         slot: target.last_sniper.slot,
         mint: target.last_sniper.mint,
@@ -329,39 +314,26 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
           </span>
         </td>
 
-        {/* 收益（第4列）：三段式 = 已实现 + 浮盈 = 总 PnL */}
+        {/* 收益（单段 = 已实现 PnL；浮盈功能已砍，2026-10-15） */}
         <td className="px-3 py-3 text-right">
           {(() => {
-            // 三段式字段（sniper 只有 last_sniper 时才有这套，未连上 sniper 时退化到 trades 表）
-            const realized = sniper?.pnl_sol != null ? parseFloat(sniper.pnl_sol) : null;
-            const unreal = sniper?.unrealized_sol != null ? parseFloat(sniper.unrealized_sol) : null;
-            const total = sniper?.total_pnl_sol != null ? parseFloat(sniper.total_pnl_sol) : realized;
+            // 单段：已实现 PnL。open/partial 时显示「持仓中」或「部分平仓 +X.XXXX」提示。
+            const pnl = sniper?.pnl_sol != null ? parseFloat(sniper.pnl_sol) : null;
             const status = sniper?.pnl_status ?? null;
-            const priceUpd = sniper?.price_updated_at ?? null;
-            // 价格 > 90s 没刷新：标 ~ 表示可能过期。
-            //   注意：price_updated_at 异常（'abc' 等）时 new Date(...).getTime() = NaN，
-            //   Date.now() - NaN = NaN，NaN > 90_000 = false ——会让 stale 误判为 false。
-            //   因此要显式 catch invalid date。
-            const priceUpdTs = priceUpd ? new Date(priceUpd).getTime() : NaN;
-            const stale = !priceUpd || !Number.isFinite(priceUpdTs) || Date.now() - priceUpdTs > 90_000;
             const isOpen = status === 'open';
             const isPartial = status === 'partial';
-            // 颜色的优先级按 total 决定（最贴近用户的真实判断）
             const tone =
-              total != null
-                ? total > 0 ? 'text-emerald-500'
-                : total < 0 ? 'text-red-500'
+              pnl != null
+                ? pnl > 0 ? 'text-emerald-500'
+                : pnl < 0 ? 'text-red-500'
                 : 'text-gray-400'
                 : 'text-gray-400';
 
-            if (total == null) {
-              // pnl_sol / total_pnl_sol 都还是 NULL：FIFO 还没跑完、浮盈也还没写出来。
-              //   ① 之后这条分支基本只会闪一下（< 1s），② 之后只对 follower 短暂出现。
-              //   用脉冲圆点 + 浅灰文字告诉用户「在算」，比「—」更直观。
+            if (pnl == null) {
               return (
                 <span
                   className="inline-flex items-center gap-1 text-gray-300 dark:text-gray-600 text-xs font-mono tabular-nums"
-                  title="pnl 还在计算中（先看浮盈，30s 内必有结果）"
+                  title="pnl 还在计算中"
                 >
                   <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
                   <span>算中</span>
@@ -369,32 +341,11 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
               );
             }
 
-            // closed 或 buy_failed：直接一个数字
-            if (!isOpen && !isPartial) {
-              return (
-                <span className={`text-xs font-mono font-semibold tabular-nums ${tone}`} title={`已实现收益（${status ?? 'closed'}）`}>
-                  {`${total >= 0 ? '+' : ''}${total.toFixed(4)}`}
-                </span>
-              );
-            }
-
-            // open / partial：三段式展示
             return (
-              <div className="flex flex-col items-end leading-tight">
-                <span className={`text-xs font-mono font-semibold tabular-nums ${tone}`}>
-                  {`${total >= 0 ? '+' : ''}${total.toFixed(4)}`}
-                  {isOpen ? '*' : ''}
-                </span>
-                {(realized != null || unreal != null) && (
-                  <span
-                    className="text-[10px] font-mono tabular-nums text-gray-400 dark:text-gray-500"
-                    title={`已实现 ${realized?.toFixed(4) ?? '-'}，浮盈 ${unreal?.toFixed(4) ?? '-'}`}
-                  >
-                    {`实${realized != null ? (realized >= 0 ? '+' : '') + realized.toFixed(3) : '-'} + 浮${unreal != null ? (unreal >= 0 ? '+' : '') + unreal.toFixed(3) : '-'}`}
-                    {stale ? ' ~' : ''}
-                  </span>
-                )}
-              </div>
+              <span className={`text-xs font-mono font-semibold tabular-nums ${tone}`} title={`已实现收益（${status ?? 'closed'}）`}>
+                {`${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)}`}
+                {isOpen ? ' *持仓中' : isPartial ? ' *部分' : ''}
+              </span>
             );
           })()}
         </td>
@@ -568,24 +519,20 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                           </td>
                           {(() => {
                             // 跟单收益：监控列表展示的是「如果跟单这个狙击者能赚多少」。
-                            // 优先读 sniper_pnl_sol（= b_first.pnl_sol，狙击者那笔的 PnL），
-                            // sniper_pnl_status='open' 时也显示数字（已实现部分），'—' 表示还没卖出。
-                            // 0020: 三段式 = 已实现 + 浮盈 = 总 PnL（狙击主行也是这套）。
-                            const realized = t.sniper_pnl_sol != null ? parseFloat(t.sniper_pnl_sol) : null;
-                            const unreal = t.sniper_unrealized_sol != null ? parseFloat(t.sniper_unrealized_sol) : null;
-                            const total = t.sniper_total_pnl_sol != null ? parseFloat(t.sniper_total_pnl_sol) : realized;
+                            // 数据源是狙击者那笔 block_buyers.pnl_sol，浮盈功能已砍（2026-10-15）。
+                            const pnl = t.sniper_pnl_sol != null ? parseFloat(t.sniper_pnl_sol) : null;
                             const status = t.sniper_pnl_status;
                             const isOpen = status === 'open';
                             const isPartial = status === 'partial';
-                            const tone = total != null
-                              ? total > 0 ? 'text-emerald-500'
-                              : total < 0 ? 'text-red-500'
+                            const tone = pnl != null
+                              ? pnl > 0 ? 'text-emerald-500'
+                              : pnl < 0 ? 'text-red-500'
                               : 'text-gray-400'
                               : 'text-gray-400';
 
-                            if (total == null) {
+                            if (pnl == null) {
                               return (
-                                <td className="py-2 px-3 text-right font-mono text-gray-300 dark:text-gray-600 tabular-nums" title="pnl 还在计算中（先看浮盈，30s 内必有结果）">
+                                <td className="py-2 px-3 text-right font-mono text-gray-300 dark:text-gray-600 tabular-nums" title="pnl 还在计算中">
                                   <span className="inline-flex items-center gap-1 justify-end">
                                     <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
                                     <span>算中</span>
@@ -594,26 +541,12 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                               );
                             }
 
-                            if (!isOpen && !isPartial) {
-                              // closed / buy_failed：单段
-                              return (
-                                <td className="py-2 px-3 text-right font-mono tabular-nums" title="狙击者已实现收益">
-                                  <span className={tone}>
-                                    {`${total >= 0 ? '+' : ''}${total.toFixed(4)}`}
-                                  </span>
-                                </td>
-                              );
-                            }
-
-                            // open / partial：三段式（小屏用紧凑形式：总额 + 副行说明「实+浮」）
                             return (
-                              <td className="py-2 px-3 text-right font-mono tabular-nums" title={`已实现 ${realized?.toFixed(4) ?? '-'}，浮盈 ${unreal?.toFixed(4) ?? '-'}`}>
-                                <div className="flex flex-col items-end leading-tight">
-                                  <span className={`${tone}`}>{`${total >= 0 ? '+' : ''}${total.toFixed(4)}${isOpen ? '*' : ''}`}</span>
-                                  <span className="text-[10px] text-gray-400 dark:text-gray-500">
-                                    {`实${realized != null ? (realized >= 0 ? '+' : '') + realized.toFixed(3) : '-'} + 浮${unreal != null ? (unreal >= 0 ? '+' : '') + unreal.toFixed(3) : '-'}`}
-                                  </span>
-                                </div>
+                              <td className="py-2 px-3 text-right font-mono tabular-nums" title={`狙击者已实现收益（${status ?? 'closed'}）`}>
+                                <span className={tone}>
+                                  {`${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)}`}
+                                  {isOpen ? ' *持仓中' : isPartial ? ' *部分' : ''}
+                                </span>
                               </td>
                             );
                           })()}
