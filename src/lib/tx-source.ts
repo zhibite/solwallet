@@ -1,97 +1,97 @@
-/**
- * 交易取数层：�?Helius 增强 API 和普�?Solana RPC 归一化成同一�?TxView�?
- *
- * ## 为什么需要这一�?
- *
- * pnl.ts 的收益算法只用到四件事：某笔交易有没有失败、手续费多少�?
- * 钱包在这�?mint 上的 token 进出、钱包的 SOL 进出�?
- * 这四件事�?Helius 增强 API 和普�?`getTransaction` 里都能拿到，
- * �?*取法完全不同**，所以算法层不能直接依赖任何一方�?
- *
- * ## 两种来源的真实差�?
- *
- * 1) `getSignaturesForAddress` 根本不是 Helius 专有接口�?
- *    就是标准 JSON-RPC。原来它被发�?Helius 的域名，白白消耗配额�?
- *
- * 2) 交易解析现在�?Helius �?Parsed Events API（`/v1/parsed-events/transactions`�?
- *    10 cr/请求）。它给的�?*已经解析好的 tokenTransfers / nativeTransfers 列表**�?
- *    旧的 Enhanced Transactions（`/v0/transactions`�?00 cr/请求）已�?maintenance
- *    mode，新代码一律走 Parsed Events + 自定义适配器（�?src/lib/helius.ts）�?
- *
- * 3) 普�?RPC 没有这个列表，但 `getTransaction` �?`meta` 里有
- *    `preTokenBalances` / `postTokenBalances` / `preBalances` / `postBalances`�?
- *    **余额差就是这笔交易真实的进出**�?
- *
- * ## 为什么余额差�?Helius 的解析列表更可信
- *
- * 余额差是链上记账的最终结果，不依赖任何一套索引器的解析规则�?
- * Helius �?*失败交易**仍会返回根本没执行的转账（实测一笔失败的买入
- * 带着一�?2.43 SOL �?phantom 转出），而失败交易的所有余额变动都�?0�?
- * 余额差天然免疫这个问题�?
- *
- * ## 一个必须讲清楚的限�?
- *
- * 余额差只能给�?*净�?*，拆不开「收了多少又付了多少」�?
- * 这一点不影响收益结果，因�?FIFO 算法对买入只用净流出、对卖出只用净流入�?
- * 净额就是它需要的全部。唯一受影响的�?trades[] 里记录的明细金额�?
- * 对收益本身没有影响�?
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 import type { TransactionResponse } from '@solana/web3.js';
 import type { HeliusEnhancedTx } from './types';
 import { getMultiRpc } from './multi-rpc';
 import { solanaTxToHeliusEnhanced, inboundTokenAmount, outboundTokenAmount } from './parser';
 
-/**
- * Helius 增强 API 的失败标记�?
- *
- * tx.err �?getSignaturesForAddress 才有的字段，�?parseTransaction 的返回里恒为 undefined�?
- * 拿它判失败等于「所有交易都算成功」�?
- *
- * 注意 null 的语义：**null 是「没解析出来」（限流 / 网络），不是「交易失败�?*�?
- * 把两者混同会把限流的结果当成买入失败写进库，比算错收益更难发现�?
- */
+
+
+
+
+
+
+
+
+
 export function isFailedTx(tx: HeliusEnhancedTx | null | undefined): boolean {
   if (!tx) return false;
   if (tx.transactionError) return true;
   return !!(tx.events?.swap?.error);
 }
 
-/** 归一化后的单笔交易视图。算法层只认这个接口，不认底层来源�?*/
+
 export interface TxView {
   signature: string;
   slot: number;
   blockTime: number;
-  /** 本笔手续�?(lamports)，含 base + priority */
+  
   feeLamports: number;
-  /** 交易是否失败�?*null 表示没取到，不能当失败用** */
+  
   failed: boolean;
-  /**
-   * 钱包在某 mint 上的 token 净变动（原始单位）�?
-   * �?= 收到（买入），负 = 卖出�?
-   */
+  
+
+
+
   tokenDelta(mint: string, wallet: string): number;
-  /**
-   * 钱包�?SOL 净变动（SOL），**已剔除本笔手续费**�?
-   * �?= 收到（卖出回款），负 = 付出（买入成本）�?
-   */
+  
+
+
+
   solNet(wallet: string): number;
-  /** �?isAkbotTx 这类需�?programId 的检测使�?*/
+  
   raw: HeliusEnhancedTx;
 }
 
-// ============================================================
-//  普�?RPC 实现：全部来�?meta 的余额差
-// ============================================================
 
-/** web3.js �?accountKeys �?legacy �?v0 下字段名不同 */
+
+
+
+
 function accountKeysOf(tx: TransactionResponse): string[] {
   const msg: any = (tx as any).transaction?.message;
   const raw: any[] = msg?.staticAccountKeys ?? msg?.accountKeys ?? [];
   return raw.map((k: any) => (typeof k === 'string' ? k : (k?.toBase58?.() ?? String(k))));
 }
 
-/** 构造余额差视图。meta 缺失时返�?null（调用方要区分「没取到」和「失败」） */
+
 export function rpcTxView(tx: TransactionResponse | null): TxView | null {
   if (!tx || !(tx as any).transaction) return null;
   const meta: any = tx.meta;
@@ -106,7 +106,7 @@ export function rpcTxView(tx: TransactionResponse | null): TxView | null {
   const preTok: any[] = meta.preTokenBalances ?? [];
   const postTok: any[] = meta.postTokenBalances ?? [];
 
-  // token 账户�?(accountIndex, mint) 索引；同一 mint 可能分散在钱包的多个 ATA 上，要累�?
+  
   const preTokMap = new Map<string, number>();
   for (const b of preTok) {
     preTokMap.set(`${b.accountIndex}-${b.mint}`, Number(b.uiTokenAmount?.amount ?? 0));
@@ -122,7 +122,7 @@ export function rpcTxView(tx: TransactionResponse | null): TxView | null {
     return i;
   };
 
-  // instructions 只需�?programId，适配器这部分是可靠的
+  
   const raw = solanaTxToHeliusEnhanced(tx) as HeliusEnhancedTx;
 
   return {
@@ -135,7 +135,7 @@ export function rpcTxView(tx: TransactionResponse | null): TxView | null {
       let sum = 0;
       for (const po of postTok) {
         if (po.mint !== mint) continue;
-        // owner 才是钱包归属；accountIndex �?token 账户，wallet 自己可能不是 token 账户
+        
         if (po.owner !== wallet) continue;
         const pre = preTokMap.get(`${po.accountIndex}-${po.mint}`) ?? 0;
         sum += Number(po.uiTokenAmount?.amount ?? 0) - pre;
@@ -146,27 +146,27 @@ export function rpcTxView(tx: TransactionResponse | null): TxView | null {
       const i = indexOf(wallet);
       if (i < 0 || i >= preSol.length || i >= postSol.length) return 0;
       const d = postSol[i] - preSol[i];
-      // 钱包自己付手续费时，余额差里已经含了 fee，要扣回来才是「除手续费外的净变动」�?
-      // 别人（Blockworks / Jito）代付时，余额差是纯粹的进出，不该再扣�?
+      
+      
       return (d - (i === 0 ? fee : 0)) / 1e9;
     },
     raw: raw ?? ({ signature: '', instructions: [] } as unknown as HeliusEnhancedTx),
   };
 }
 
-// ============================================================
-//  Helius 增强 API 实现：配额恢复后可用
-// ============================================================
 
-/**
- * �?SOL 净变动时要纳入的账户集合�?
- *
- * 之前这里�?feePayer != wallet 时把 feePayer 也加进去，结果把 relayer / Jito �?tip 的那一�?
- * （feePayer = �?tip 那个账户）算成了 trader �?solOut�?*买入成本虚高 0.001 SOL**�?
- *
- * 修正：只�?wallet 自己�?SOL 进出。feePayer == wallet 的常见场景下行为不变�?
- * relayer 代付场景下，relayer �?fee / tip 不再污染 trader �?pnl�?
- */
+
+
+
+
+
+
+
+
+
+
+
+
 function ownersOf(tx: HeliusEnhancedTx, wallet: string): string[] {
   return [wallet];
 }
@@ -176,8 +176,8 @@ export function heliusTxView(tx: HeliusEnhancedTx | null): TxView | null {
   const txAny = tx as any;
   return {
     signature: tx.signature,
-    // Helius Enhanced API�?v0/transactions）把 slot/blockTime 放在 data 子对象下�?
-    // Parsed Events API（parsedEventItemToEnhanced）直接放在顶层，兼容两种路径�?
+    
+    
     slot: txAny.data?.slot ?? txAny.slot ?? 0,
     blockTime: txAny.data?.blockTime ?? txAny.blockTime ?? 0,
     feeLamports: tx.fee ?? 0,
@@ -186,25 +186,25 @@ export function heliusTxView(tx: HeliusEnhancedTx | null): TxView | null {
       return inboundTokenAmount(tx, mint, wallet) - outboundTokenAmount(tx, mint, wallet);
     },
         solNet(wallet: string): number {
-      // 优先用 Helius 的 accountData[].nativeBalanceChange -- ground truth。
-      // pump.fun 卖出 SOL 收入有时不在 nativeTransfers,只算它会把一笔 +0.7 SOL
-      // 的卖出算成 -0.008 SOL(只剩 jito tip + protocol fee),sniper_pnl 倒挂成 -buy_sol。
-      // 2026-10-14 4AJCZ.../6LXdh.../4M7RY.../9k53Y... 一批 pnl ≈ -buy_sol 全部由此。
+      
+      
+      
+      
       const ad = (tx as any).accountData;
       if (Array.isArray(ad)) {
         const me = ad.find((a: any) => a?.account === wallet);
         if (me && typeof me.nativeBalanceChange === 'number') {
-          // accountData 已含 fee,feePayer == wallet 时再减一次,与 RPC 路径一致。
+          
           const isPayer = (tx as any).feePayer === wallet;
           return (me.nativeBalanceChange - (isPayer ? (tx.fee ?? 0) : 0)) / 1e9;
         }
       }
-      // fallback: 旧 nativeTransfers 累加路径,pump.fun 卖出可能漏 SOL 进账。
+      
       const owners = ownersOf(tx, wallet);
       let solIn = 0;
       let solOut = 0;
       for (const t of tx.nativeTransfers ?? []) {
-        if (t.fromUserAccount === t.toUserAccount) continue; // 自转不算
+        if (t.fromUserAccount === t.toUserAccount) continue; 
         const amt = Number(t.amount);
         if (owners.includes(t.toUserAccount)) solIn += amt;
         if (owners.includes(t.fromUserAccount)) solOut += amt;
@@ -215,9 +215,9 @@ export function heliusTxView(tx: HeliusEnhancedTx | null): TxView | null {
   };
 }
 
-// ============================================================
-//  来源选择
-// ============================================================
+
+
+
 
 export type TxSourceKind = 'rpc' | 'helius' | 'auto';
 
@@ -227,7 +227,7 @@ function configuredSource(): TxSourceKind {
 }
 
 let _kind: TxSourceKind | null = null;
-let _heliusDead = false;   // 探测到配额耗尽后，本次进程内不再试 Helius
+let _heliusDead = false;   
 
 export function activeSource(): TxSourceKind {
   if (_kind) return _kind;
@@ -236,32 +236,32 @@ export function activeSource(): TxSourceKind {
   return _kind;
 }
 
-/** �?/settings 之类的页面显示当前实际在用哪条链�?*/
+
 export function sourceStatus(): { configured: TxSourceKind; active: TxSourceKind; heliusDead: boolean } {
   return { configured: configuredSource(), active: activeSource(), heliusDead: _heliusDead };
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** 同时跑多少个 getTransaction。公�?RPC 对并发敏感，6 是实测不炸的上限附近�?*/
+
 function fetchConcurrency(): number {
   const v = parseInt(process.env.PNL_FETCH_CONCURRENCY ?? '', 10);
   return Number.isFinite(v) && v > 0 ? Math.min(v, 12) : 6;
 }
 
-/**
- * 取一批交易，返回与输�?*同序**的结果�?
- *
- * null = 没取到（限流 / 网络 / 节点没有这笔），
- * 绝不能当成「交易失败」—�?调用方要能区分这两种情况�?
- */
+
+
+
+
+
+
 export async function fetchTxViews(
   sigs: string[],
   wallet: string,
 ): Promise<Array<TxView | null>> {
   if (sigs.length === 0) return [];
 
-  // ---- Helius Enhanced Transactions API ----
+  
   if (activeSource() === 'helius' || (activeSource() === 'auto' && !_heliusDead)) {
     try {
       const { getHelius } = await import('./helius');
@@ -270,21 +270,21 @@ export async function fetchTxViews(
     } catch (err: any) {
       const status = err?.response?.status ?? err?.status;
       if (status === 429 || /max usage|quota|rate/i.test(err?.message ?? '')) {
-        console.warn('[tx-source] Helius 配额耗尽，本次进程切到公�?RPC');
+        console.warn('[tx-source] Helius RPC');
         _heliusDead = true;
       } else if (activeSource() === 'helius') {
-        // 显式要求 helius 却报别的错，仍然退回去，否则整条链路瘫�?
-        console.warn('[tx-source] Helius Enhanced 取数失败，退回公�?RPC:', (err as Error).message);
+        
+        console.warn('[tx-source] Helius Enhanced RPC:', (err as Error).message);
         _heliusDead = true;
       } else {
-        // auto 模式：任�?Helius 错误�?fallback 到公�?RPC，不抛错
-        console.warn('[tx-source] Helius Enhanced 取数失败，退回公�?RPC:', (err as Error).message);
+        
+        console.warn('[tx-source] Helius Enhanced RPC:', (err as Error).message);
         _heliusDead = true;
       }
     }
   }
 
-  // ---- 公共 RPC ----
+  
   const rpc = getMultiRpc();
   const out: Array<TxView | null> = new Array(sigs.length).fill(null);
   const conc = fetchConcurrency();
@@ -303,7 +303,7 @@ export async function fetchTxViews(
           const msg = err?.message ?? String(err);
           const retriable = /429|503|502|504|timeout|socket|ECONN/i.test(msg);
           if (!retriable || attempt === 2) {
-            if (attempt === 2) console.warn(`[tx-source] 取不�?${sigs[i].slice(0, 12)}�? ${msg.slice(0, 100)}`);
+            if (attempt === 2) console.warn(`[tx-source] ${sigs[i].slice(0, 12)} ${msg.slice(0, 100)}`);
             break;
           }
           await sleep(500 * (attempt + 1));
@@ -316,9 +316,9 @@ export async function fetchTxViews(
   return out;
 }
 
-// ============================================================
-//  签名列表：按地址缓存
-// ============================================================
+
+
+
 
 export interface SigInfo {
   signature: string;
@@ -328,14 +328,14 @@ export interface SigInfo {
 }
 
 const SIG_PAGE_SIZE = 1000;
-const MAX_SIG_PAGES = 20;   // 单次计算最多往后翻 2 万笔
+const MAX_SIG_PAGES = 20;   
 
-/**
- * 签名�?(地址, 起点) 缓存�?
- *
- * 一个地址�?block_buyers 里可能有多行（最多的一个有 328 行），同一行的多次请求
- * 也可能重试。缓存后这些重复请求只付一次�?
- */
+
+
+
+
+
+
 const sigCache = new Map<string, SigInfo[]>();
 const SIG_CACHE_MAX = 200;
 
@@ -344,7 +344,7 @@ function cacheKey(address: string, fromSig: string): string {
 }
 
 function rememberSigs(key: string, sigs: SigInfo[]): void {
-  // Map 保持插入序，删最早的即可近似 LRU
+  
   while (sigCache.size >= SIG_CACHE_MAX) {
     const oldest = sigCache.keys().next().value;
     if (oldest === undefined) break;
@@ -357,38 +357,38 @@ export function clearSigCache(): void {
   sigCache.clear();
 }
 
-/**
- * 取某个地址**�?fromSig 之后**的所有签名，按链上顺序从旧到新排好�?
- *
- * ## 为什么是「从买入往后翻」而不是「从现在往回翻�?
- *
- * 早期实现�?getSignaturesForAddress(address) 从链尾往回翻页，找到买入那一笔，
- * 再截取它之后那一段。这有两个致命问题：
- *
- * 1) **够不到�?* 翻页上限 2 万笔。钱包只要在这笔买入之后又做�?2 万笔交易�?
- *    买入就被挤出窗口了。实测一�?2026-09-30 的历史行，钱包签名窗口最老只�?
- *    slot 453498000，而买入在 451923109 —�?�?160 万个 slot，永远走不到�?
- *    够不到时 calcCopyPnl 会返�?status='open' / pnlSol=null�?
- *    回填脚本会把这个已经算对�?closed �?*覆盖�?NULL**�?
- *
- * 2) **贵�?* 一个钱包要先翻 2 万笔才够得着买入，而真正需要的往往只有买入�?
- *    几十笔。实�?429 频繁、熔断器连续打开�?
- *
- * 改用 until=fromSig：第一页直接就是「买入之后最新的 1000 笔」，
- * 再用 before 把窗口往更老的方向挪、同时用 until 锁住下界�?
- * 于是**只翻买入之后那几�?*，既不受链尾位置影响，也几乎不消耗翻页预算�?
- *
- * 代价：拿不到买入之前的历史。但 calcCopyPnl 本来就不需要那些�?
- *
- * @param fromSig 起点签名�?*不含**这一笔本�?
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 export async function fetchSigsFrom(address: string, fromSig: string): Promise<SigInfo[]> {
   const key = cacheKey(address, fromSig);
   const cached = sigCache.get(key);
   if (cached) return cached;
 
   const rpc = getMultiRpc();
-  const collected: SigInfo[] = [];   // newest-first，最�?reverse
+  const collected: SigInfo[] = [];   
   let before: string | undefined;
 
   for (let i = 0; i < MAX_SIG_PAGES; i++) {
@@ -396,12 +396,12 @@ export async function fetchSigsFrom(address: string, fromSig: string): Promise<S
     try {
       batch = await rpc.getSignaturesForAddress(address, SIG_PAGE_SIZE, before, fromSig);
     } catch (err: any) {
-      // 翻到一半失败：宁可返回不完整的部分，也不要整条链路断掉�?
-      // 调用方拿到的链路短了，只会把「持仓中」算成「还没卖完」，
-      // 不会凭空编出一个收益数�?
+      
+      
+      
       if (collected.length > 0) {
         console.warn(
-          `[tx-source] ${address.slice(0, 8)}�?往后翻签名中断（已�?${collected.length} 笔）: ` +
+          `[tx-source] ${address.slice(0, 8)}${collected.length} : ` +
           String(err?.message ?? err).slice(0, 80),
         );
         break;
