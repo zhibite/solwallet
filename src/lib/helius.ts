@@ -338,7 +338,7 @@ export class HeliusClient {
     try {
       // 加 10s 超时，防止免费端点挂住把 analyzeBlock 卡死
       const tx = await Promise.race([
-        getFallbackRpc().getTransaction(signature),
+        getFallbackRpc()!.getTransaction(signature),
         new Promise<null>((_, reject) => setTimeout(() => reject(new Error('fallback timeout')), 10_000)),
       ]);
       if (!tx) return null;

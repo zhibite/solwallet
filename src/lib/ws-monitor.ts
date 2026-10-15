@@ -15,10 +15,10 @@
  * - 轮询作为 WebSocket 断开时的兜底，以及历史数据补扫
  */
 
-import { Connection, PublicKey } from '@solana/web3.js';
+import { Connection, Context, PublicKey } from '@solana/web3.js';
 import { query } from './db';
 import { parseHeliusTx, solanaTxToHeliusEnhanced } from './parser';
-import { saveBlockAnalysis, applyFirstSniperToTarget, computeBulkBuyerPnL } from './first-sniper';
+import { saveBlockAnalysis, applyFirstSniperToTarget, computeBulkBuyerPnL, prefillOpenUnrealized } from './first-sniper';
 import { scanForTarget } from './pool';
 import { quickAkbotCheck, isAkbotCircuitOpen } from './akbot';
 import { markAsAkbot } from './pool';
@@ -151,7 +151,7 @@ export async function stopWsMonitor() {
 
   // 关闭连接
   if (s.wsConnection) {
-    s.wsConnection.removeAllListeners();
+    // Connection 没有 removeAllListeners，用 null 让 GC 回收旧连接
     s.wsConnection = null;
   }
 
@@ -287,7 +287,7 @@ function setupEventListeners() {
 /**
  * 处理断开连接
  */
-function handleDisconnect() {
+async function handleDisconnect() {
   const s = getState();
   if (!s.isRunning) return;
 
@@ -299,10 +299,15 @@ function handleDisconnect() {
 
   console.warn(`[ws-monitor] connection closed${elapsed}`);
 
-  // 清理订阅
+  // 清理订阅（事件回调里调用，本函数 async 返回的 Promise 在此处被忽略，
+  // 所以内部 try/catch 必须吃掉所有异常，避免 unhandled promise rejection）
   s.subscriptions.clear();
   if (s.pumpFunSubscriptionId !== null && s.wsConnection) {
-    s.wsConnection.removeLogsListener(s.pumpFunSubscriptionId);
+    try {
+      await s.wsConnection.removeOnLogsListener(s.pumpFunSubscriptionId);
+    } catch (err) {
+      console.warn('[ws-monitor] handleDisconnect: removeOnLogsListener pumpFun failed:', err);
+    }
     s.pumpFunSubscriptionId = null;
   }
 
@@ -476,7 +481,7 @@ async function unsubscribe(address: string) {
   if (subscriptionId === undefined) return;
 
   try {
-    await s.wsConnection.removeLogsListener(subscriptionId);
+    await s.wsConnection.removeOnLogsListener(subscriptionId);
     s.subscriptions.delete(address);
     console.log(`[ws-monitor] unsubscribed from ${address.slice(0, 8)}...`);
   } catch (err) {
@@ -768,7 +773,7 @@ async function unsubscribeAll() {
   for (const [address, subscriptionId] of s.subscriptions) {
     try {
       if (s.wsConnection) {
-        await s.wsConnection.removeLogsListener(subscriptionId);
+        await s.wsConnection.removeOnLogsListener(subscriptionId);
       }
     } catch (err) {
       console.error(`[ws-monitor] error removing subscription ${subscriptionId}:`, err);
@@ -789,9 +794,9 @@ async function unsubscribePumpFun() {
     return;
   }
   try {
-    s.wsConnection.removeLogsListener(s.pumpFunSubscriptionId);
+    await s.wsConnection.removeOnLogsListener(s.pumpFunSubscriptionId);
   } catch (err) {
-    console.warn('[ws-monitor] removeLogsListener pumpFun failed:', err);
+    console.warn('[ws-monitor] removeOnLogsListener pumpFun failed:', err);
   }
   s.pumpFunSubscriptionId = null;
 }
@@ -802,7 +807,7 @@ async function unsubscribePumpFun() {
 async function handleLogs(
   address: string,
   logs: any,
-  context: { slot: number; signature: string },
+  context: Context,
 ) {
   recordHeartbeat(); // 记录心跳，表明订阅活跃
   // Solana web3.js onLogs 回调里 signature 在 logs (LogInfo) 上，不在 context 上
@@ -917,7 +922,7 @@ async function getTransactionDetails(signature: string): Promise<any> {
           heliusConn.getTransaction(signature, {
             maxSupportedTransactionVersion: 1,
             rewards: false,
-          }),
+          } as any),
         RPC_TIMEOUT_MS,
         `helius getTransaction ${signature.slice(0, 12)}`,
       );
@@ -1021,6 +1026,24 @@ async function ingestWsTrade(targetId: number, buy: any, rawTx: any) {
         ? new Date(buy.blockTime * 1000).toISOString()
         : new Date().toISOString();
       await saveBlockAnalysis(buy.slot, buy.mint, buy.signature, blockTime, analyzeResult);
+
+      // 【提速 ①】与 monitor.ts 保持一致：立即给「有 token + 未平仓」的 buyer 落一份浮盈。
+      //   监控页「跟单收益」列不用等 unrealized-worker 30s tick 才有数字。
+      setImmediate(() => {
+        prefillOpenUnrealized(buy.slot, buy.mint)
+          .then((r) => {
+            if (r.written === 0 && r.reason === 'no eligible buyers') return;
+            console.log(
+              `[ws-monitor] prefill open slot=${buy.slot} mint=${buy.mint.slice(0, 8)}... written=${r.written} skipped=${r.skipped} (${r.reason})`,
+            );
+          })
+          .catch((e) =>
+            console.warn(
+              `[ws-monitor] prefill open failed slot=${buy.slot}:`,
+              (e as Error)?.message ?? e,
+            ),
+          );
+      });
 
       // 【P0 修复】立即算本 block 所有 buyer 的 PnL（fire-and-forget，不阻塞后面的 sniper 回填 / pool scan / akbot）
       // 与 monitor.ts:295-308 保持完全一致；WS 路径之前漏掉了导致 sniper_pnl_sol 永远是 NULL。

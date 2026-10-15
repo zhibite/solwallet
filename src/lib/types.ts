@@ -98,6 +98,12 @@ export interface BlockAnalysis {
   same_slot_count: number;
   /** 下一个 slot 内同一 mint 的买入笔数 */
   next_slot_count: number;
+  /** 0021: 狙击者竞争态势（块级） */
+  competitor_count: number | null;
+  /** 0021: 系统选中的狙击者地址（默认 = first_sniper，可被决策逻辑覆盖） */
+  chosen_address: string | null;
+  /** 0021: 竞争者排名 JSON：{ "<address>": rank1, ... } */
+  competitor_rank: Record<string, number> | null;
   created_at: string;
 }
 
@@ -142,6 +148,12 @@ export interface BlockBuyer {
   pnl_sold_ratio: string | null;
   /** 0018: 该笔是否是目标本人（signature = analysis.target_signature） */
   is_self: boolean;
+  /** 0021: 我们 own wallet 在该 block 的竞争 rank（NULL=不是 own） */
+  mine_rank: number | null;
+  /** 0021: 相对目标 slot 的差（-1=前置，0=同 slot，1=下一 slot） */
+  sniper_slot_delta: number | null;
+  /** 0021: 在同+next-slot 非 own 非 target 内的排名（1-based；NULL=不参与竞争） */
+  competitor_rank: number | null;
 }
 
 /** Helius Enhanced Transaction 简化结构 */

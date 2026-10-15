@@ -178,7 +178,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
   // 狙击者分两种状态（参考站）：
   //   - 同 slot 抢到 (offset_pos !== null)：显示「抢到 +N」（N 可正可负；
   //     负数 = 狙击者抢在目标之前，jito bundle 内联场景）
-  //   - 跨 slot 抢到 (offset_pos === null, sniper 存在)：只显示「下slot +Nms」徽章，
+  //   - 跨 slot 抢到 (offset_pos === null, sniper 存在)：只显示「下slot +N」徽章，
   //     不再叠加「失败」标签 —— 「first_sniper」按定义就是「target 之后第一笔非 target 买入」，
   //     跨 slot 不算失败，只是时机不同。
   // 没记录 pos 时 fallback 到 offset_ms（同 slot 下 ms 不可信，但 fallback 时还是给方向）。
@@ -186,6 +186,12 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
     if (sniper?.first_sniper_offset_pos != null) return sniper.first_sniper_offset_pos;
     if (sniper?.first_sniper_offset_ms != null) return sniper.first_sniper_offset_ms;
     return 0;
+  })();
+  // 跨 slot 时的 slot 差（sniper_slot - target_slot），单位是 slot 数量
+  const sniperSlotDiff = (() => {
+    if (sniper?.first_sniper_slot == null || sniper?.slot == null) return null;
+    const diff = sniper.first_sniper_slot - sniper.slot;
+    return diff !== 0 ? diff : null; // 0 = 同 slot（走同 slot 分支），不显示
   })();
   // 「下slot」标签 = 狙击者存在但跨 slot（offset_pos=null）
   const sniperNextSlot = !!sniper?.first_sniper && sniper.first_sniper_offset_pos == null;
@@ -212,12 +218,12 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
         {/* 状态 */}
         <td className="px-3 py-3 text-center">
           {target.status === 'active' ? (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/30">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/30 whitespace-nowrap">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
               监控中
             </span>
           ) : (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 dark:bg-zinc-700 dark:text-gray-300 border border-gray-200 dark:border-zinc-600">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 dark:bg-zinc-700 dark:text-gray-300 border border-gray-200 dark:border-zinc-600 whitespace-nowrap">
               已暂停
             </span>
           )}
@@ -227,7 +233,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
         <td className="px-3 py-3 text-center" onClick={(e) => e.stopPropagation()}>
           <button
             onClick={() => onToggleAutoFollow(target.id, !target.auto_follow)}
-            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border transition-colors ${
+            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border whitespace-nowrap transition-colors ${
               target.auto_follow
                 ? 'border-emerald-400/50 text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10 hover:bg-emerald-100 dark:hover:bg-emerald-500/20'
                 : 'border-gray-200 dark:border-gray-600 text-gray-400 dark:text-gray-500 hover:bg-slate-100 dark:hover:bg-zinc-700'
@@ -248,14 +254,14 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
         </td>
 
         {/* 最新buy时间 */}
-        <td className="px-3 py-3">
+        <td className="px-3 py-3 whitespace-nowrap">
           <span className="text-xs font-mono text-gray-500 dark:text-gray-400 tabular-nums">
             {target.last_buy_at ? fmtTime(target.last_buy_at) : '-'}
           </span>
         </td>
 
         {/* 距现在 */}
-        <td className="px-3 py-3">
+        <td className="px-3 py-3 whitespace-nowrap">
           <RelativeTime iso={target.last_buy_at} />
         </td>
 
@@ -287,12 +293,12 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                     抢到 {sniperOffset > 0 ? '+' : ''}{sniperOffset}
                   </span>
                 ) : (
-                  // 跨 slot：fallback 到 ms 偏移（保留符号）
+                  // 跨 slot：显示 slot 差
                   <span
                     className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 dark:bg-zinc-700 text-gray-600 dark:text-gray-300 border border-slate-200 dark:border-zinc-600 font-mono"
-                    title={`狙击者在下一个 slot 追入，时间差 ${sniperOffset}ms`}
+                    title={`狙击者在第 ${sniperSlotDiff} 个 slot 追入`}
                   >
-                    下slot {sniperOffset > 0 ? '+' : ''}{sniperOffset}ms
+                    下slot {sniperSlotDiff != null && sniperSlotDiff > 0 ? '+' : ''}{sniperSlotDiff}
                   </span>
                 )}
               </span>
@@ -323,25 +329,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
           </span>
         </td>
 
-        {/* 目标 tip（第4列）【P1-#3】目标付了多少 tip，用户决定跟多少 tip 时参考 */}
-        <td className="px-3 py-3 text-right">
-          <span className="font-mono text-xs text-amber-400 dark:text-amber-500 font-semibold tabular-nums">
-            {sniper?.target_tip_sol != null
-              ? Number(sniper.target_tip_sol).toFixed(6)
-              : <span className="text-gray-300 dark:text-gray-600">—</span>}
-          </span>
-        </td>
-
-        {/* 目标 prio（第5列）【P1-#3】目标付了多少 prio fee */}
-        <td className="px-3 py-3 text-right">
-          <span className="font-mono text-xs text-purple-300 dark:text-purple-500 font-semibold tabular-nums">
-            {sniper?.target_prio_lamports != null
-              ? (Number(sniper.target_prio_lamports) / 1e9).toFixed(6)
-              : <span className="text-gray-300 dark:text-gray-600">—</span>}
-          </span>
-        </td>
-
-        {/* 收益（第6列）：三段式 = 已实现 + 浮盈 = 总 PnL */}
+        {/* 收益（第4列）：三段式 = 已实现 + 浮盈 = 总 PnL */}
         <td className="px-3 py-3 text-right">
           {(() => {
             // 三段式字段（sniper 只有 last_sniper 时才有这套，未连上 sniper 时退化到 trades 表）
@@ -367,9 +355,16 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                 : 'text-gray-400';
 
             if (total == null) {
+              // pnl_sol / total_pnl_sol 都还是 NULL：FIFO 还没跑完、浮盈也还没写出来。
+              //   ① 之后这条分支基本只会闪一下（< 1s），② 之后只对 follower 短暂出现。
+              //   用脉冲圆点 + 浅灰文字告诉用户「在算」，比「—」更直观。
               return (
-                <span className="text-gray-400 text-xs font-mono" title="pnl 还在计算中">
-                  —
+                <span
+                  className="inline-flex items-center gap-1 text-gray-300 dark:text-gray-600 text-xs font-mono tabular-nums"
+                  title="pnl 还在计算中（先看浮盈，30s 内必有结果）"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
+                  <span>算中</span>
                 </span>
               );
             }
@@ -433,7 +428,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
       {/* 阈值编辑浮层（参考页用 prompt，这里用 inline input 替代） */}
       {editingThreshold && (
         <tr className="bg-blue-50/80 dark:bg-blue-500/10">
-          <td colSpan={13} className="px-3 py-2.5">
+          <td colSpan={11} className="px-3 py-2.5">
             <div className="flex items-center gap-3 text-sm">
               <span className="text-gray-500 dark:text-gray-300 font-medium">阈值 (SOL)：</span>
               <input
@@ -455,7 +450,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
       {/* ===== 第2层：买入交易列表 ===== */}
       {expanded && (
         <tr>
-          <td colSpan={13} className="px-6 py-5">
+          <td colSpan={11} className="px-6 py-5">
             {loadingTrades ? (
               <div className="flex items-center gap-2 text-xs text-gray-400 dark:text-gray-500 py-6">
                 <span className="w-4 h-4 rounded-full border-2 border-current animate-spin" style={{ borderTopColor: 'transparent' }} />
@@ -478,8 +473,6 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                       <th className="py-2.5 px-3 text-left font-semibold">第一个狙击者</th>
                       <th className="py-2.5 px-3 text-right font-semibold">tip</th>
                       <th className="py-2.5 px-3 text-right font-semibold">prio</th>
-                      <th className="py-2.5 px-3 text-right font-semibold" title="目标付的 tip">目标tip</th>
-                      <th className="py-2.5 px-3 text-right font-semibold" title="目标付的 prio fee">目标prio</th>
                       <th className="py-2.5 px-3 text-right font-semibold">跟单收益</th>
                       <th className="py-2.5 px-3 text-right font-semibold" title="同 slot + 下一 slot 买这个 token 的总笔数">买家</th>
                       <th className="py-2.5 px-3 text-center font-semibold" title="在所有跟这个目标的人里，我是第几个跟上的">我的排位</th>
@@ -497,6 +490,12 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                         if (t.first_sniper_offset_pos != null) return t.first_sniper_offset_pos;
                         if (t.first_sniper_offset_ms != null) return t.first_sniper_offset_ms;
                         return 0;
+                      })();
+                      // 跨 slot 时的 slot 差（sniper_slot - target_slot），单位是 slot 数量
+                      const snSlotDiff = (() => {
+                        if (t.first_sniper_slot == null || t.slot == null) return null;
+                        const diff = t.first_sniper_slot - t.slot;
+                        return diff !== 0 ? diff : null;
                       })();
                       const competitorCount = (t.same_slot_count ?? 0) + (t.next_slot_count ?? 0);
 
@@ -545,12 +544,12 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                                     抢到 {snOffset > 0 ? '+' : ''}{snOffset}
                                   </span>
                                 ) : (
-                                  // 跨 slot：fallback 到 ms 偏移
+                                  // 跨 slot：显示 slot 差
                                   <span
                                     className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 dark:bg-zinc-700 text-gray-600 dark:text-gray-300 border border-slate-200 dark:border-zinc-600 font-mono"
-                                    title={`狙击者在下一个 slot 追入，时间差 ${snOffset}ms`}
+                                    title={`狙击者在第 ${snSlotDiff} 个 slot 追入`}
                                   >
-                                    下slot {snOffset > 0 ? '+' : ''}{snOffset}ms
+                                    下slot {snSlotDiff != null && snSlotDiff > 0 ? '+' : ''}{snSlotDiff}
                                   </span>
                                 )}
                               </div>
@@ -565,16 +564,6 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                           <td className="py-2 px-3 text-right font-mono text-purple-600 dark:text-purple-400 tabular-nums">
                             {t.first_sniper_prio_lamports != null
                               ? (Number(t.first_sniper_prio_lamports) / 1e9).toFixed(6)
-                              : <span className="text-gray-300 dark:text-gray-600">—</span>}
-                          </td>
-                          <td className="py-2 px-3 text-right font-mono text-amber-400 dark:text-amber-500 tabular-nums">
-                            {t.target_tip_sol != null
-                              ? Number(t.target_tip_sol).toFixed(6)
-                              : <span className="text-gray-300 dark:text-gray-600">—</span>}
-                          </td>
-                          <td className="py-2 px-3 text-right font-mono text-purple-300 dark:text-purple-500 tabular-nums">
-                            {t.target_prio_lamports != null
-                              ? (Number(t.target_prio_lamports) / 1e9).toFixed(6)
                               : <span className="text-gray-300 dark:text-gray-600">—</span>}
                           </td>
                           {(() => {
@@ -596,7 +585,12 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
 
                             if (total == null) {
                               return (
-                                <td className="py-2 px-3 text-right font-mono text-gray-400 tabular-nums" title="pnl 还在计算中">—</td>
+                                <td className="py-2 px-3 text-right font-mono text-gray-300 dark:text-gray-600 tabular-nums" title="pnl 还在计算中（先看浮盈，30s 内必有结果）">
+                                  <span className="inline-flex items-center gap-1 justify-end">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
+                                    <span>算中</span>
+                                  </span>
+                                </td>
                               );
                             }
 
@@ -660,7 +654,7 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                         // ===== 第3层：内嵌于第2层内部的 block 级买家分布（手风琴展开行） =====
                         isThisTradeExpanded && (
                           <tr key={`detail-${t.id}`} className="bg-gradient-to-r from-slate-50 to-blue-50/30 dark:from-zinc-700/30 dark:to-blue-500/10 border-b border-gray-200 dark:border-gray-700">
-                            <td colSpan={14} className="px-5 py-4">
+                            <td colSpan={12} className="px-5 py-4">
                               <div className="flex items-center justify-between mb-2">
                                 <div className="flex items-center gap-2">
                                   <span className="w-1.5 h-1.5 rounded-full bg-brand-500" />

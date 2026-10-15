@@ -36,6 +36,11 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ slot: stri
           ...result.analysis,
           target_address: targetBuyer?.address,
           target_buy_sol: targetBuyer?.buy_sol,
+          // 0021: 狙击者竞争态势（从 block_analyses 顶层透传）
+          // competitor_rank 是 PG JSONB，前端按 address 查
+          competitor_count: (result.analysis as any).competitor_count ?? null,
+          chosen_address: (result.analysis as any).chosen_address ?? null,
+          competitor_rank: (result.analysis as any).competitor_rank ?? {},
         },
         buyers,
       },

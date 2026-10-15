@@ -54,8 +54,14 @@ logs/
 
 # 临时调试脚本/截图（不纳入版本控制）
 /tmp
+
 # 诊断 / benchmark / 临时探针脚本（跑完即弃，不进版本）
 scripts/_diag-*.ts
 scripts/_bench-*.ts
 scripts/_drop-*.ts
 scripts/_list-*.ts
+
+# 运行时残留的错误日志 / 探针 dump（不要进版本）
+.dev.err
+.monitor.err
+.diag-*.json

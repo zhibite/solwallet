@@ -39,6 +39,10 @@ interface Buyer {
   bundle_id: string | null;
   bundle_size: number | null;
   tip_source: import('@/lib/types').TipSource | null;
+  /** 0021: 狙击者竞争态势 */
+  mine_rank: number | null;
+  sniper_slot_delta: number | null;
+  competitor_rank: number | null;
 }
 
 interface Analysis {
@@ -52,6 +56,10 @@ interface Analysis {
   target_block_index: number | null;
   same_slot_count: number;
   next_slot_count: number;
+  /** 0021: 狙击者竞争态势（块级） */
+  competitor_count: number | null;
+  chosen_address: string | null;
+  competitor_rank: Record<string, number> | null;
 }
 
 export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
@@ -246,10 +254,12 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
               : ''
       }`}
     >
+      {/* 块内序号 */}
       <td className="px-3 py-2 font-mono text-xs text-gray-800 dark:text-white/90">
         {b.block_index + 1}
         {b.slot_offset === 1 && <span className="ml-1 text-purple-500 text-[10px]" title="下一 slot">+1槽</span>}
       </td>
+      {/* 偏移 */}
       <td className={`px-3 py-2 text-right font-mono text-xs ${offsetClass(b)}`}>
         {b.slot_offset === 1
           ? 'slot+1'
@@ -259,6 +269,31 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
               ? `+${b.offset_pos}`
               : b.offset_pos}
       </td>
+      {/* slot 差（-1/0/+1） */}
+      <td className="px-3 py-2 text-center">
+        {b.sniper_slot_delta != null ? (
+          <span className={`font-mono text-xs ${
+            b.sniper_slot_delta === -1 ? 'text-blue-400' :
+            b.sniper_slot_delta === 0 ? 'text-gray-400' : 'text-purple-400'
+          }`}>
+            {b.sniper_slot_delta === -1 ? '前' :
+             b.sniper_slot_delta === 0 ? '同' : `+${b.sniper_slot_delta}`}
+          </span>
+        ) : <span className="text-gray-500">—</span>}
+      </td>
+      {/* 竞争排名 */}
+      <td className="px-3 py-2 text-center">
+        {b.competitor_rank != null ? (
+          <span className={`inline-block min-w-[24px] text-center font-mono text-xs rounded px-1 ${
+            b.competitor_rank === 1 ? 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300 font-bold' :
+            b.competitor_rank <= 3 ? 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300' :
+            'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'
+          }`}>
+            #{b.competitor_rank}
+          </span>
+        ) : <span className="text-gray-400">—</span>}
+      </td>
+      {/* 角色 */}
       <td className="px-3 py-2">{roleTag(b)}</td>
       <td className="px-3 py-2">
         <AddressCopy address={b.address} length={6} />
@@ -346,6 +381,14 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
     </tr>
   );
 
+  // 0021: 竞争态势
+  const competitorCount = analysis.competitor_count ?? 0;
+  const chosenShort = analysis.chosen_address
+    ? `${analysis.chosen_address.slice(0, 6)}…${analysis.chosen_address.slice(-4)}`
+    : null;
+  const myRank = buyers.find((b) => b.is_own && b.mine_rank != null)?.mine_rank ?? null;
+  const firstSniperRank = buyers.find((b) => b.is_first_sniper)?.competitor_rank ?? null;
+
   return (
     <div className="space-y-3">
       {/* 参考页风格：单行摘要头 */}
@@ -362,6 +405,32 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
         下一个 slot 里 <span className="font-semibold text-gray-800 dark:text-white/90">{nextSlot.length}</span> 笔，
         共 <span className="font-semibold text-gray-800 dark:text-white/90">{totalCount}</span> 笔（含失败的）
         <span className="ml-2 text-gray-400">时间: <RelativeTime iso={analysis.block_time} /></span>
+
+        {/* 0021: 狙击者竞争态势徽章 */}
+        {competitorCount > 0 && (
+          <>
+            <span className="ml-3 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-orange-100 dark:bg-orange-900/40 text-orange-700 dark:text-orange-300 font-medium">
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+              {competitorCount} snipers
+              {firstSniperRank != null && <span className="font-mono">· #1</span>}
+              {chosenShort && <span className="ml-1 font-mono">{chosenShort}</span>}
+            </span>
+            {myRank != null && (
+              <span className={`ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${
+                myRank <= 3
+                  ? 'bg-success-100 dark:bg-success-900/40 text-success-700 dark:text-success-300'
+                  : myRank <= 7
+                    ? 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300'
+                    : 'bg-gray-200 dark:bg-gray-700 text-gray-500'
+              }`}>
+                I&apos;m rank {myRank}
+              </span>
+            )}
+          </>
+        )}
+        {competitorCount === 0 && (
+          <span className="ml-3 text-gray-400">无竞争狙击者</span>
+        )}
       </div>
 
       {/* 操作栏 */}
@@ -406,14 +475,16 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
         <table className="w-full text-sm">
           <thead className="bg-gray-50 dark:bg-zinc-700/50 text-xs text-gray-500 dark:text-gray-400">
             <tr>
-              <th className="px-3 py-2 text-left">块内序</th>
-              <th className="px-3 py-2 text-right">偏移</th>
-              <th className="px-3 py-2 text-left">标记</th>
+              <th className="px-3 py-2 text-left">#</th>
+              <th className="px-3 py-2 text-right">偏</th>
+              <th className="px-3 py-2 text-left">slot差</th>
+              <th className="px-3 py-2 text-left">竞排名</th>
+              <th className="px-3 py-2 text-left">角色</th>
               <th className="px-3 py-2 text-left">地址</th>
-              <th className="px-3 py-2 text-right">买入SOL</th>
+              <th className="px-3 py-2 text-right">SOL</th>
               <th className="px-3 py-2 text-right">tip</th>
               <th className="px-3 py-2 text-right">优先费</th>
-              <th className="px-3 py-2 text-right">跟单收益</th>
+              <th className="px-3 py-2 text-right">收益</th>
               <th className="px-3 py-2 text-center">结果</th>
               <th className="px-3 py-2 text-center">版本</th>
               <th className="px-3 py-2 text-center">tx</th>
@@ -428,7 +499,7 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
               <>
                 {/* 分组分隔行 */}
                 <tr>
-                  <td colSpan={12} className="px-3 py-1 text-[10px] text-purple-500 font-semibold bg-purple-50 dark:bg-purple-500/10 border-t border-gray-200 dark:border-gray-700">
+                  <td colSpan={14} className="px-3 py-1 text-[10px] text-purple-500 font-semibold bg-purple-50 dark:bg-purple-500/10 border-t border-gray-200 dark:border-gray-700">
                     ▼ 下一个 slot（{nextSlot.length} 笔）
                   </td>
                 </tr>

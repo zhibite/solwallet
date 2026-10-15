@@ -44,6 +44,9 @@ export async function POST(req: NextRequest) {
       count: result.buyers.length,
       sameSlotCount: result.sameSlotCount,
       nextSlotCount: result.nextSlotCount,
+      // 0021: 狙击者竞争态势
+      competitorCount: result.competitorCount,
+      chosenAddress: result.chosenAddress,
       sniperApplied,
     });
   } catch (err: any) {

@@ -347,11 +347,11 @@ export default function MonitorList() {
             <thead className="bg-gray-50 dark:bg-zinc-800/50 text-xs text-gray-500 dark:text-gray-400">
               <tr>
                 <th className="px-3 py-2 text-left font-medium whitespace-nowrap">监控目标</th>
-                <th className="px-3 py-2 text-center font-medium w-24 whitespace-nowrap">状态</th>
-                <th className="px-3 py-2 text-center font-medium w-20 whitespace-nowrap">自动跟单</th>
+                <th className="px-3 py-2 text-center font-medium w-32 whitespace-nowrap">状态</th>
+                <th className="px-3 py-2 text-center font-medium w-24 whitespace-nowrap">自动跟单</th>
                 <th className="px-3 py-2 text-center font-medium w-14 whitespace-nowrap">记录数</th>
-                <th className="px-3 py-2 text-left font-medium w-32 whitespace-nowrap">最新buy时间</th>
-                <th className="px-3 py-2 text-left font-medium w-20 whitespace-nowrap">距现在</th>
+                <th className="px-3 py-2 text-left font-medium w-44 whitespace-nowrap">最新buy时间</th>
+                <th className="px-3 py-2 text-left font-medium w-28 whitespace-nowrap">距现在</th>
                 <th className="px-3 py-2 text-left font-medium w-40 whitespace-nowrap">最近狙击者</th>
                 <th className="px-3 py-2 text-right font-medium w-22 whitespace-nowrap">tip</th>
                 <th className="px-3 py-2 text-right font-medium w-22 whitespace-nowrap">prio</th>
