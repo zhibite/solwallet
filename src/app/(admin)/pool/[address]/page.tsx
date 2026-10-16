@@ -6,6 +6,7 @@ import SolAmount from "@/components/common/SolAmount";
 import PrioSolAmount from "@/components/common/PrioSolAmount";
 import RelativeTime from "@/components/common/RelativeTime";
 import { useConfirm } from "@/components/ui/confirm-dialog";
+import { ExternalLinkIcon } from "@/icons";
 
 interface PoolMember {
   id: number;
@@ -915,9 +916,24 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
                 {following.map((e) => (
                   <tr key={e.id} className="border-b border-gray-100 dark:border-gray-700/50">
                     <td className="py-1.5 px-2">
-                      <Link href={`/pool/${e.target}`} className="hover:text-brand-500">
-                        <AddressCopy address={e.target} />
-                      </Link>
+                      <div className="flex items-center gap-1">
+                        <Link href={`/pool/${e.target}`} className="hover:text-brand-500">
+                          <AddressCopy address={e.target} />
+                        </Link>
+                        {/* GMGN 钱包详情外链 —— 放在 AddressCopy 后面，与复制图标相邻。
+                            不嵌进 <Link>，避免点 GMGN 时被外层 Link 拦截成跳转 /pool/[address]。
+                            target="_blank" + rel="noopener noreferrer" 是外链标准做法。 */}
+                        <a
+                          href={`https://gmgn.ai/sol/address/${e.target}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center justify-center w-5 h-5 rounded text-gray-400 hover:text-brand-500 hover:bg-gray-100 dark:hover:bg-zinc-700 transition-colors"
+                          title={`在 GMGN 查看 ${e.target.slice(0, 6)}…${e.target.slice(-4)}`}
+                          aria-label="在 GMGN 查看"
+                        >
+                          <ExternalLinkIcon className="w-3 h-3" />
+                        </a>
+                      </div>
                     </td>
                     <td className="py-1.5 px-2 text-center font-mono font-semibold text-brand-500 dark:text-brand-400">{e.freq}</td>
                     <td className="py-1.5 px-2 text-center text-xs">
@@ -963,9 +979,22 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
                 {followers.map((e) => (
                   <tr key={e.id} className="border-b border-gray-100 dark:border-gray-700/50">
                     <td className="py-1.5 px-2">
-                      <Link href={`/pool/${e.follower}`} className="hover:text-brand-500">
-                        <AddressCopy address={e.follower} />
-                      </Link>
+                      <div className="flex items-center gap-1">
+                        <Link href={`/pool/${e.follower}`} className="hover:text-brand-500">
+                          <AddressCopy address={e.follower} />
+                        </Link>
+                        {/* GMGN 钱包详情外链 —— 同上 (following 表)，复用样式。 */}
+                        <a
+                          href={`https://gmgn.ai/sol/address/${e.follower}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center justify-center w-5 h-5 rounded text-gray-400 hover:text-brand-500 hover:bg-gray-100 dark:hover:bg-zinc-700 transition-colors"
+                          title={`在 GMGN 查看 ${e.follower.slice(0, 6)}…${e.follower.slice(-4)}`}
+                          aria-label="在 GMGN 查看"
+                        >
+                          <ExternalLinkIcon className="w-3 h-3" />
+                        </a>
+                      </div>
                     </td>
                     <td className="py-1.5 px-2 text-center font-mono font-semibold text-brand-500 dark:text-brand-400">{e.freq}</td>
                     <td className="py-1.5 px-2 text-center text-xs">
