@@ -818,9 +818,16 @@ export interface BulkBuyerPnLResult {
   soldRatio: number | null;
 }
 
+// 默认并发 3（不是 8）：
+//   - 实测 Helius free tier 50 rps，8 路并发买 6 路 fetchTxViews 子并发 = 48 路 RPC in-flight，
+//     撞 429 是常态（compute-pnl 跑 6 分钟过不了 1 个 block 就是这个）。
+//   - 3 路并发买 6 子并发 = 18 路 in-flight，单端点 rps 足够吃下，
+//     配合 multi-rpc.ts 端点合并修复（5 端点 round-robin）后几乎不会 429。
+//   - 想更激进：环境变量 BULK_PNL_CONCURRENCY=6 / 8，但要确认 5 个端点都健康。
+//   - 想更保守：=2（保守，1 个 block 内全走完往往要 5-10 分钟）。
 const BULK_PNL_CONCURRENCY = Math.max(
   1,
-  parseInt(process.env.BULK_PNL_CONCURRENCY || '8', 10),
+  parseInt(process.env.BULK_PNL_CONCURRENCY || '3', 10),
 );
 
 /**
@@ -851,21 +858,26 @@ export async function computeBulkBuyerPnL(
   const { analysis, buyers } = got;
 
   // 决定哪些需要重算：
-  //   - 目标 / 我的账号 / 第一个狙击者：永远 FIFO 算（用户最想看的核心三方）
-  //   - 失败 tx：跳过（pnl_status='buy_failed' 已经写死了）
-  //   - 其他人 follower / pre_target：第一次进入（pnl_status NULL）时跑；
+  //   - 我的账号 / 第一个狙击者：永远算（开发者自己账户 + 狙击单，最关键）
+  //   - 跟单者（follower / pre_target）：第一次进入（pnl_status NULL）时跑；
   //     之后 pnl_status='open' 的：没卖出 = 没 realized = 跑也是白跑，
   //     直接跳过（2026-10-15 砍掉浮盈后，open 跟随单者没有浮盈兜底刷新，
   //     要 partial/closed 只能等用户手动点 /api/.../buyer/[id]/pnl）。
-  //   - 都覆盖不到的：按现有规则（pnl_status NULL = 第一次进入）跑一次
+  //   - 目标账号（target）：不参与 cron 计算——选目标时已人工确认盈利，
+  //     重复算既浪费 RPC 也不产生业务价值（系统关注的是跟单者和狙击者的 tip/优先费/净盈利）。
+  //     单点重算仍可走 /api/block/[slot]/[mint]/buyer/[id]/pnl 覆盖。
+  //   - 失败 tx：跳过（pnl_status='buy_failed' 已经写死了）
+  //   - pnl_status='stale'：cron 已主动放弃（>2h 仍 NULL），不再重算
   const toCompute = buyers.filter((b) => {
     if (opts.force) return true;
     if (b.result === 'failed') return false; // 买入失败，pnl 固定就是手续费
-    if (b.is_own || b.is_first_sniper || b.signature === analysis.target_signature) return true;
+    // 目标账号不参与 cron 计算（见上方注释）
+    if (b.signature === analysis.target_signature) return false;
+    if (b.is_own || b.is_first_sniper) return true;
     if (!b.pnl_status) return true;
-    // follower / pre_target 在 open 状态：FIFO 翻签名页 = 纯浪费
+    // follower / pre_target 在 open 状态：没卖出 = 无 realized = 纯浪费
     if (b.pnl_status === 'open' && b.token_amount && Number(b.token_amount) > 0) return false;
-    return false;
+    return false; // 其他（closed/partial/stale）跳过
   });
   const skippedExisting = buyers.length - toCompute.length;
 

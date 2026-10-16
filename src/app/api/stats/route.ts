@@ -1,9 +1,9 @@
 /**
  * /api/stats
  * GET - 全局统计（首页用）
- *   recordedBuys = target_trades 总数
- *   pending      = target_trades 中还没分析完的（block_analyses 里没对应记录）
- *   analyzed     = block_analyses 去重后的 target_signature 数（每个被分析过的目标 trade 一次）
+ *   recordedBuys = target_trades 总数（buy 笔数）
+ *   pending      = target_trades 中还没分析完的 buy 笔数（block_analyses 里没对应记录）
+ *   analyzed     = block_analyses 去重后的 target_signature 数（按 buy 计）
  */
 import { NextResponse } from 'next/server';
 import { queryOne } from '@/lib/db';

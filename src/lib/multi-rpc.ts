@@ -798,22 +798,45 @@ let _lastUrls: string[] = [];
 /**
  * 从环境变量读取 RPC 端点列表。
  *
- * 优先读 SOLANA_RPCS（逗号分隔的单个字符串），再读编号的 SOLANA_RPC_1/2/3...
- * 只有两者都没有时才 fallback 到 defaultEndpoints（防止旧配置丢失）。
+ * 三种来源全部合并去重（按出现顺序）：
+ *   1. SOLANA_RPCS（逗号分隔单字符串，Helius 优先走这里）
+ *   2. SOLANA_RPC_1, SOLANA_RPC_2, ...（编号格式，兼容旧配置 / 其他付费端点）
+ *   3. 都没有时回退到 defaultEndpoints（4 个公共 free RPC）
+ *
+ * ⚠️ 2026-10-16 重要修复：旧逻辑「只要 SOLANA_RPCS 非空就只取它」导致
+ *   .env 里同时配了 SOLANA_RPCS 和 SOLANA_RPC_1..5 时，只有 1 个端点被加载，
+ *   全部请求打到一个 Helius，50 rps 配额很快撞 429。compute-pnl cron 因此
+ *   跑 6 分钟都过不了一个 block。改成合并去重，4 个付费端点 + 1 个 Helius
+ *   一起 round-robin，单端点压力立刻降到 1/5。
+ *
+ * 重复（同一 URL）会被去重，避免同一个 RPC 拿 2 份配额却只跑 1 份。
  */
 function loadRpcEndpoints(): string[] {
-  // 1. SOLANA_RPCS（逗号分隔字符串，与 solana-rpc.ts 的 HELIUS_RPCS 保持一致）
-  const commaList = (process.env.SOLANA_RPCS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-  if (commaList.length > 0) return commaList;
+  const out: string[] = [];
+  const seen = new Set<string>();
 
-  // 2. 编号格式 SOLANA_RPC_1, SOLANA_RPC_2, ...（兼容旧配置）
-  const urls: string[] = [];
+  function push(u: string) {
+    const v = (u ?? '').trim();
+    if (!v) return;
+    if (seen.has(v)) return;
+    seen.add(v);
+    out.push(v);
+  }
+
+  // 1. SOLANA_RPCS（逗号分隔字符串，与 solana-rpc.ts 的 HELIUS_RPCS 保持一致）
+  for (const u of (process.env.SOLANA_RPCS ?? '').split(',')) push(u);
+
+  // 2. 编号格式 SOLANA_RPC_1, SOLANA_RPC_2, ...（兼容旧配置 / 混搭付费端点）
   for (let i = 1; ; i++) {
     const val = process.env[`SOLANA_RPC_${i}`];
     if (val === undefined || val.trim() === '') break;
-    urls.push(val.trim());
+    push(val);
   }
-  return urls.length > 0 ? urls : MultiFreeRpc.defaultEndpoints();
+
+  // 3. 都没配才回退到 defaultEndpoints（4 个公共 free RPC，免费档大多数早已 403/429，
+  //    留作最后兜底）
+  if (out.length === 0) return MultiFreeRpc.defaultEndpoints();
+  return out;
 }
 
 /**

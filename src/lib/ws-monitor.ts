@@ -22,6 +22,7 @@ import { saveBlockAnalysis, applyFirstSniperToTarget, computeBulkBuyerPnL } from
 import { scanForTarget } from './pool';
 import { quickAkbotCheck, isAkbotCircuitOpen } from './akbot';
 import { markAsAkbot } from './pool';
+import { getHelius, parsedEventItemToEnhanced } from './helius';
 
 // ============ 配置 ============
 
@@ -70,6 +71,12 @@ interface WsMonitorState {
   recentPumpMints: Set<string>;
   // 心跳时间戳（用于调试，不驱动重连逻辑）
   lastHeartbeatAt: number;
+  // 静默 target 兜底定时器
+  backstopTimer: NodeJS.Timeout | null;
+  // 上一次兜底跑过的「目标快照」（避免两次跑之间打相同的 target）
+  backstopLastRunAt: number;
+  // 兜底是否正在执行（防止两轮 interval 并发重叠）
+  backstopRunning: boolean;
 }
 
 declare global {
@@ -96,6 +103,9 @@ function getState(): WsMonitorState {
       targetRefreshTimer: null,
       recentPumpMints: new Set(),
       lastHeartbeatAt: 0,
+      backstopTimer: null,
+      backstopLastRunAt: 0,
+      backstopRunning: false,
     };
   }
   return globalThis.__wsMonitorState;
@@ -121,6 +131,11 @@ export async function startWsMonitor() {
 
   // 启动目标地址刷新定时器（定期同步数据库中的目标列表）
   startTargetRefresh();
+
+  // 启动静默 target 兜底：每 5 分钟扫一次「近 10 分钟没新交易但 24h 活跃」的 target，
+  // 防止 WS 断连 / 重连 backoff / Pump.fun 自动 target race 期间漏单。
+  // 量级：~25 个 target × 每 5 分钟 = 5 req/min，可忽略。
+  startSilentBackstop();
 }
 
 /**
@@ -143,6 +158,10 @@ export async function stopWsMonitor() {
   if (s.targetRefreshTimer) {
     clearInterval(s.targetRefreshTimer);
     s.targetRefreshTimer = null;
+  }
+  if (s.backstopTimer) {
+    clearInterval(s.backstopTimer);
+    s.backstopTimer = null;
   }
 
   // 取消所有订阅
@@ -567,6 +586,9 @@ async function handlePumpFunLogs(
 
     if (hasCreate) {
       // ---- 新币创建：提取 mint，加入监控列表，并立即订阅 ----
+      // 【dev_wallet 暂缓（2026-10-16）】原本想在这里把 feePayer 落 mint_dev_wallets
+      // 并在 ingestWsTrade 回查 is_dev_buy，但确认下游链路（follow / sniper / PnL / 告警）
+      // 都不消费 is_dev_buy，TargetRow.tsx 的 dev badge 是纯装饰。整个 0023 链路待定。
       const mint = extractPumpFunMint(tx);
       if (!mint) return;
 
@@ -1079,7 +1101,173 @@ async function ingestWsTrade(targetId: number, buy: any, rawTx: any) {
   });
 }
 
-// ============ AkBot 检测（复用 monitor.ts 的逻辑） ============
+// ============ 静默 target 兜底（每 5 分钟） ============
+
+const BACKSTOP_INTERVAL_MS = 5 * 60 * 1000; // 5 分钟
+const BACKSTOP_QUIET_MINUTES = 10;          // 多久没新交易算「静默」
+const BACKSTOP_LOOKBACK_SIGNATURES = 10;   // 每次拉多少条 sig
+const BACKSTOP_BATCH_PARSE = 5;            // Helius parseEvents 一次最多处理多少条
+
+/**
+ * 启动静默 target 兜底定时器
+ *
+ * 场景：WS 断连 / 重连 backoff（3-30s）/ Pump.fun 自动 target 还没订阅完
+ *       这三种情况会让某些 buy 永久漏掉。
+ *
+ * 策略：只针对「近 BACKSTOP_QUIET_MINUTES 分钟没新交易但 24h 内交易频繁」的
+ *       active target，单次 getSignaturesForAddress 拉最近 10 条 sig，
+ *       对新 sig（target_trades 里没见过的）走 parseEvents + ingestWsTrade。
+ *
+ * 成本：~25 个 target × 每 5 分钟 = 5 req/min，可忽略。
+ *
+ * 安全：ON CONFLICT (signature) DO UPDATE 兜底，即使 WS 之后又抓到同 sig 也不会重复。
+ */
+function startSilentBackstop() {
+  const s = getState();
+  if (s.backstopTimer) return;
+  s.backstopTimer = setInterval(() => {
+    if (s.isRunning && !s.backstopRunning) {
+      runSilentBackstop().catch((e) =>
+        console.warn('[ws-monitor] silent backstop error:', (e as Error).message),
+      );
+    }
+  }, BACKSTOP_INTERVAL_MS);
+  // 别让定时器吊住进程退出
+  if (typeof s.backstopTimer.unref === 'function') s.backstopTimer.unref();
+
+  // 启动 60s 后跑第一次（让 WS 主路径先把当下的交易都抓完，避免一上来就抢同一批 sig）
+  setTimeout(() => {
+    if (s.isRunning && !s.backstopRunning) {
+      runSilentBackstop().catch((e) =>
+        console.warn('[ws-monitor] silent backstop initial error:', (e as Error).message),
+      );
+    }
+  }, 60_000);
+  console.log(`[ws-monitor] silent backstop enabled: every ${BACKSTOP_INTERVAL_MS / 1000}s, quiet threshold ${BACKSTOP_QUIET_MINUTES}min`);
+}
+
+async function runSilentBackstop() {
+  const s = getState();
+  // 互斥锁：若上轮还没跑完，本轮直接放弃（interval 和 initial 都会跳过）
+  if (s.backstopRunning) return;
+  s.backstopRunning = true;
+  s.backstopLastRunAt = Date.now();
+
+  try {
+
+  // 1) 找出「近 10 分钟没新交易但 24h 内有 ≥3 笔」的 active target
+  //    过滤 24h < 3 的目标：本身就是低频 target，没有兜底价值，省 RPC
+  const candidates = await query<{
+    id: number;
+    address: string;
+    threshold_sol: string;
+    last_buy_at: Date | null;
+  }>(`
+    SELECT t.id, t.address, t.threshold_sol, t.last_buy_at
+    FROM monitored_targets t
+    WHERE t.status = 'active'
+      AND t.last_buy_at IS NOT NULL
+      AND t.last_buy_at < NOW() - interval '${BACKSTOP_QUIET_MINUTES} minutes'
+      AND EXISTS (
+        SELECT 1 FROM target_trades tt
+        WHERE tt.target_id = t.id
+          AND tt.created_at > NOW() - interval '24 hours'
+      )
+  `);
+
+  if (candidates.length === 0) return;
+
+  const rpc = await import('./multi-rpc').then((m) => m.getMultiRpc());
+  const helius = await import('./helius').then((m) => m.getHelius());
+  const thresholdByTarget = new Map<number, number>();
+  for (const c of candidates) thresholdByTarget.set(c.id, parseFloat(c.threshold_sol));
+
+  let totalChecked = 0;
+  let totalBackfilled = 0;
+
+  for (const t of candidates) {
+    try {
+      const sigs = await rpc.getSignaturesForAddress(t.address, BACKSTOP_LOOKBACK_SIGNATURES);
+      if (sigs.length === 0) continue;
+      totalChecked += sigs.length;
+
+      // 只看「last_buy_at 之后」的 sig（更早的肯定入过库了）
+      const lastBuyAtSec = t.last_buy_at
+        ? Math.floor(new Date(t.last_buy_at).getTime() / 1000) - 5
+        : 0;
+      const freshSigs = lastBuyAtSec > 0
+        ? sigs.filter((s: any) => s.blockTime && s.blockTime > lastBuyAtSec)
+        : sigs;
+      if (freshSigs.length === 0) continue;
+
+      // 过滤失败的 tx
+      const goodSigs = freshSigs.filter((s: any) => !s.err);
+      if (goodSigs.length === 0) continue;
+
+      // 2) 查重：单批 SELECT ANY 一次性 dedupe
+      const existingRows = await query<{ signature: string }>(
+        'SELECT signature FROM target_trades WHERE signature = ANY($1::text[])',
+        [goodSigs.map((s: any) => s.signature)],
+      );
+      const existingSet = new Set(existingRows.map((r) => r.signature));
+      const newSigs = goodSigs
+        .filter((s: any) => !existingSet.has(s.signature))
+        .map((s: any) => ({ signature: s.signature, blockTime: s.blockTime }));
+      if (newSigs.length === 0) continue;
+
+      // 3) 批量解析（一次最多 BACKSTOP_BATCH_PARSE 条，防止单 target 拉一大串拖慢整轮）
+      for (let i = 0; i < newSigs.length; i += BACKSTOP_BATCH_PARSE) {
+        const batch = newSigs.slice(i, i + BACKSTOP_BATCH_PARSE);
+        let parsedItems;
+        try {
+          parsedItems = await helius.parseEvents(batch.map((b) => b.signature));
+        } catch (perr: any) {
+          // 429 / 5xx：整批跳过，下轮 5min 后再试
+          const status = perr?.response?.status ?? perr?.status;
+          if (status === 429) {
+            console.warn(
+              `[ws-monitor] backstop 429 on ${t.address.slice(0, 8)}… — skip batch of ${batch.length}, retry next round`,
+            );
+          } else {
+            console.warn(
+              `[ws-monitor] backstop parseEvents failed on ${t.address.slice(0, 8)}…: ${perr?.message ?? perr}`,
+            );
+          }
+          continue;
+        }
+
+        for (let j = 0; j < parsedItems.length; j++) {
+          const item = parsedItems[j];
+          const meta = batch[j];
+          if (!item || !meta) continue;
+          if (item.parserStatus !== 'OK' || !item.parsed) continue;
+          const tx = parsedEventItemToEnhanced(item);
+          if (!tx) continue;
+          const buy = parseHeliusTx(tx);
+          if (!buy) continue;
+          const threshold = thresholdByTarget.get(t.id) ?? 0;
+          if (buy.buySol < threshold) continue;
+          await ingestWsTrade(t.id, buy, tx);
+          totalBackfilled++;
+        }
+      }
+    } catch (err) {
+      console.warn(`[ws-monitor] backstop target ${t.address} failed:`, (err as Error).message);
+    }
+  }
+
+  if (totalChecked > 0) {
+    console.log(
+      `[ws-monitor] backstop: scanned=${candidates.length} checked=${totalChecked} backfilled=${totalBackfilled}`,
+    );
+  }
+
+  } finally {
+    s.backstopRunning = false;
+  }
+}
+
+
 
 const akbotRetryQueue: string[] = [];
 const AKBOT_RETRY_MAX = 500;
@@ -1183,5 +1371,8 @@ export function getWsMonitorStatus() {
     secondsSinceLastHeartbeat: s.lastHeartbeatAt > 0
       ? Math.round((Date.now() - s.lastHeartbeatAt) / 1000)
       : null,
+    // 静默 target 兜底状态
+    backstopEnabled: s.backstopTimer !== null,
+    backstopLastRunAt: s.backstopLastRunAt > 0 ? new Date(s.backstopLastRunAt).toISOString() : null,
   };
 }

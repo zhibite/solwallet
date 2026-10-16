@@ -330,6 +330,17 @@ export default function TargetRow({ target, onPause, onResume, onDelete, onClear
                 : 'text-gray-400';
 
             if (pnl == null) {
+              // pnl_status='stale' = cron 已主动放弃（>2h），区别于"还在算"
+              if (status === 'stale') {
+                return (
+                  <span
+                    className="text-gray-300 dark:text-gray-600 text-xs font-mono tabular-nums"
+                    title="已超过 2 小时未处理，cron 已主动放弃"
+                  >
+                    已过期
+                  </span>
+                );
+              }
               return (
                 <span
                   className="inline-flex items-center gap-1 text-gray-300 dark:text-gray-600 text-xs font-mono tabular-nums"

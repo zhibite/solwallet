@@ -14,6 +14,7 @@ interface Stats {
   recordedBuys: number;
   pending: number;
   analyzed: number;
+  stale?: number;
   failed?: number;
   last_error?: string;
   running?: number;
@@ -244,16 +245,8 @@ export default function MonitorList() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <StatCard label="监控中" value={stats?.activeTargets ?? '-'} />
         <StatCard label="已记录 buy" value={stats?.recordedBuys ?? '-'} />
-        <StatCard label="待分析" value={stats?.pending ?? '-'} />
-        <StatCard label="已分析" value={stats?.analyzed ?? '-'} />
-        {stats?.failed !== undefined && stats.failed > 0 && (
-          <StatCard label="取块失败" value={stats.failed} accent="error" />
-        )}
-        {stats?.last_error && (
-          <div className="col-span-2 text-xs text-error-500 truncate" title={stats.last_error}>
-            任务报错：{stats.last_error}
-          </div>
-        )}
+        <StatCard label="待分析 buy" value={stats?.pending ?? '-'} />
+        <StatCard label="已分析 buy" value={stats?.analyzed ?? '-'} />
       </div>
 
       {statusText.length > 0 && (
@@ -426,13 +419,18 @@ function WsStatusBar({ wsStatus }: { wsStatus: WsStatus | null }) {
   );
 }
 
-function StatCard({ label, value, accent }: { label: string; value: number | string; accent?: string }) {
+function StatCard({ label, value, accent, hint }: { label: string; value: number | string; accent?: 'error' | 'muted'; hint?: string }) {
   return (
     <div className="bg-white dark:bg-zinc-800 shadow-sm rounded-lg border border-gray-200 dark:border-gray-700 p-4">
       <div className="text-xs text-gray-500 dark:text-gray-400">{label}</div>
-      <div className={`text-2xl font-semibold mt-1 ${accent === 'error' ? 'text-error-500' : 'text-gray-800 dark:text-white/90'}`}>
+      <div className={`text-2xl font-semibold mt-1 ${
+        accent === 'error' ? 'text-error-500'
+        : accent === 'muted' ? 'text-gray-400 dark:text-gray-500'
+        : 'text-gray-800 dark:text-white/90'
+      }`}>
         {value}
       </div>
+      {hint && <div className="text-[10px] text-gray-400 dark:text-gray-500 mt-1 leading-tight">{hint}</div>}
     </div>
   );
 }

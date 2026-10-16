@@ -312,7 +312,9 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
         {b.prio_lamports != null ? (Number(b.prio_lamports) / 1e9).toFixed(6) : '0'}
       </td>
       <td className="px-3 py-2 text-right">
-        {b.pnl_status === 'open' ? (
+        {b.pnl_status === 'stale' ? (
+          <span className="font-mono text-xs text-gray-400 line-through" title="已超过 2 小时未处理，系统已放弃">已过期</span>
+        ) : b.pnl_status === 'open' ? (
           <span className="font-mono text-xs text-warning-500" title="持仓中，浮盈未实现">持仓中</span>
         ) : b.pnl_status === 'buy_failed' ? (
           <span className="font-mono text-xs text-error-500" title="买入交易失败">买入失败</span>
@@ -362,6 +364,15 @@ export default function BlockDetailView({ slot, mint }: BlockDetailViewProps) {
               className="text-warning-600 dark:text-warning-400 hover:text-error-500 disabled:opacity-50 text-xs"
             >
               取消认定
+            </button>
+          ) : b.pnl_status === 'stale' ? (
+            // 已过期：cron 已主动放弃，但用户仍可手动重算（覆盖 stale → closed/open/partial）
+            <button
+              onClick={() => calcBuyerPnL(b.id)}
+              className="text-gray-400 dark:text-gray-500 hover:text-brand-500 text-xs"
+              title="已超过 2 小时，cron 已主动放弃；点此手动重算"
+            >
+              重算
             </button>
           ) : (
             <>

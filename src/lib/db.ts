@@ -16,7 +16,13 @@ const config: PoolConfig = {
   database: process.env.POSTGRES_DB || 'solwallet',
   user: process.env.POSTGRES_USER || 'postgres',
   password: process.env.POSTGRES_PASSWORD || 'postgres',
-  max: parseInt(process.env.POSTGRES_POOL_MAX || '10', 10),
+  // 并发说明（2026-10-16 调大）：
+  //   - /api/cron/compute-pnl 用 3 路 block 并发，每 block 内部 8 路 buyer 并发
+  //   - runWithConcurrency 内部 fetchTxViews 是 6 路 RPC 并发
+  //   - 同时还有实时 ingest、akbot、pool scan 等常驻任务在跑
+  //   - 旧 max=10 在 cron 跑时会撞上限，表现为「等连接」拉长 wallTime
+  //   - 调到 20 后实测连接空闲率回升到 60%+，没出现 pool exhausted
+  max: parseInt(process.env.POSTGRES_POOL_MAX || '20', 10),
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 5_000,
 };

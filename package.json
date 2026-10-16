@@ -9,7 +9,6 @@
     "start": "next start",
     "lint": "eslint .",
     "db:init": "tsx --env-file=.env scripts/init-db.ts",
-    "monitor": "tsx --env-file=.env scripts/monitor.ts",
     "pnl-backfill-all": "tsx --env-file=.env scripts/backfill-all-pending-pnl.ts",
     "pnl-backfill-sniper": "tsx --env-file=.env scripts/backfill-sniper-pnl.ts"
   },
