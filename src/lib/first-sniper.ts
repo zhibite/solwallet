@@ -693,6 +693,14 @@ export async function saveBlockAnalysis(
 
     // 插入每个 buyer
     // bundle_size 统计：先插完所有 buyer，再统一回填（按 bundle_id 聚合）
+    //
+    // balance 探测（next_balance_check_at / balance_check_count）：每个 buyer 一入库就
+    // 预约 1 分钟后的余额探测（详见 src/lib/balance-probe.ts）。
+    //   - 失败买入（result='failed'）：token_amount 通常为 NULL，scheduleBalanceProbe
+    //     会过滤掉；这里仍然写 NULL 保持一致
+    //   - 成功买入：1 分钟后探测 token 余额，余额降了立即精算 PnL
+    //   - ON CONFLICT (slot, signature) DO UPDATE 时也要重置探测时间
+    //     （同一 sig 被 re-analyze 时，新一轮分析应当重新预约探测）
     const bundleIdCounts = new Map<string, number>();
     for (const b of result.buyers) {
       await client.query(
@@ -702,8 +710,9 @@ export async function saveBlockAnalysis(
            is_first_sniper, is_follower, is_own, is_pre_target,
            result, version, is_bundled,
            has_alt, bundle_id, tip_source,
-           mine_rank, sniper_slot_delta, competitor_rank
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+           mine_rank, sniper_slot_delta, competitor_rank,
+           next_balance_check_at, balance_check_count
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
          ON CONFLICT (slot, signature) DO UPDATE SET
            block_analysis_id = EXCLUDED.block_analysis_id,
            block_index      = EXCLUDED.block_index,
@@ -727,7 +736,9 @@ export async function saveBlockAnalysis(
            tip_source       = EXCLUDED.tip_source,
            mine_rank        = EXCLUDED.mine_rank,
            sniper_slot_delta = EXCLUDED.sniper_slot_delta,
-           competitor_rank  = EXCLUDED.competitor_rank`,
+           competitor_rank  = EXCLUDED.competitor_rank,
+           next_balance_check_at = EXCLUDED.next_balance_check_at,
+           balance_check_count   = EXCLUDED.balance_check_count`,
         [
           analysisId,
           b.slotOffset === 0 ? slot : slot + 1,
@@ -754,6 +765,11 @@ export async function saveBlockAnalysis(
           b.mineRank,
           b.sniperSlotDelta,
           b.competitorRank,
+          // 仅成功买入 + 拿到 token_amount 才设探测时间；其余 buyer 留 NULL
+          b.result === 'success' && b.tokenAmount != null && Number(b.tokenAmount) > 0
+            ? new Date(Date.now() + 60_000)
+            : null,
+          0,
         ],
       );
       if (b.bundleId) {

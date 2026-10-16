@@ -485,6 +485,17 @@ export class MultiFreeRpc {
         return conn.getBlockHeight();
       case 'getMultipleAccounts':
         return conn.getMultipleAccountsInfo(params[0].map((p: string) => new PublicKey(p)));
+      case 'getTokenAccountsByOwner':
+        // params: [owner: string, filter: { mint: string } | { programId: string }]
+        //   注意：Solana web3.js 期待 mint/programId 是 PublicKey，不是 string；
+        //   不转会被内部 tokenFilterEncoder 报「filter.mint.toBase58 is not a function」。
+        // 返回结构：{ value: Array<{ pubkey: string, account: { data: { parsed: { info: { tokenAmount: { amount, decimals, uiAmount } } } } } }> }
+        return conn.getTokenAccountsByOwner(
+          new PublicKey(params[0]),
+          params[1]?.mint
+            ? { mint: new PublicKey(params[1].mint) }
+            : (params[1] ?? { programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') }),
+        );
       default:
         throw new Error(`Unsupported method: ${method}`);
     }
@@ -789,6 +800,45 @@ export class MultiFreeRpc {
       ],
       5_000,
     );
+  }
+
+  /**
+   * 查询某 owner 在某 mint 下的所有 token account 余额。
+   *
+   * 用途（balance-probe）：快速判断 buyer 的 token 余额相对买入时降了多少。
+   * 节点本地查询，不需要扫历史，比翻签名 + getTransaction 链详情省 1-2 个数量级。
+   *
+   * 返回结构（Solana web3.js 标准）：
+   *   { value: Array<{
+   *       pubkey: string,                  // ATA 地址
+   *       account: {
+   *         data: { parsed: { info: {
+   *           mint: string,
+   *           owner: string,
+   *           tokenAmount: { amount: string, decimals: number, uiAmount: number | null }
+   *         } } }
+   *       }
+   *     }> }
+   *
+   * @param owner 钱包地址（buyer）
+   * @param mint  token mint
+   * @returns 关联的 token account 列表（一般 0 或 1 个；0 表示用户已 close ATA / 从未建过）
+   *
+   * 缓存 3 秒：余额变化频率远高于此，缓存几乎不影响探测精度；
+   * 主要是防止 cron 1 分钟跑两次时，第二次同 mint 探测白打 RPC。
+   */
+  async getTokenAccountsByOwner(
+    owner: string,
+    mint: string,
+  ): Promise<{
+    value: Array<{
+      pubkey: string;
+      account: {
+        data: { parsed: { info: { mint: string; owner: string; tokenAmount: { amount: string; decimals: number; uiAmount: number | null } } } };
+      };
+    }>;
+  } | null> {
+    return this.rpc('getTokenAccountsByOwner', [owner, { mint }], 3_000);
   }
 }
 

@@ -10,7 +10,8 @@
     "lint": "eslint .",
     "db:init": "tsx --env-file=.env scripts/init-db.ts",
     "pnl-backfill-all": "tsx --env-file=.env scripts/backfill-all-pending-pnl.ts",
-    "pnl-backfill-sniper": "tsx --env-file=.env scripts/backfill-sniper-pnl.ts"
+    "pnl-backfill-sniper": "tsx --env-file=.env scripts/backfill-sniper-pnl.ts",
+    "pnl-backfill-stale": "tsx --env-file=.env scripts/backfill-stale-pnl.ts"
   },
   "dependencies": {
     "@fullcalendar/core": "^6.1.19",
