@@ -80,6 +80,56 @@ interface TopCompetitor {
   avg_prio_lamports: number;
 }
 
+// ── Member 视角（2026-10-16 拆分后新增）─────────────────────────────────
+// 详情页 analytics.view === 'member' 时使用这些字段。
+
+interface MemberTrendPoint {
+  trade_signature: string;
+  block_time: string;
+  slot: number;
+  mint: string;
+  target_address: string;
+  is_first_sniper: boolean;
+  is_follower: boolean;
+  is_pre_target: boolean;
+  buy_sol: number;
+  tip_sol: number;
+  prio_lamports: number;
+  block_index: number;
+  result: string;
+  pnl_sol: number | null;
+}
+
+interface TopTarget {
+  address: string;
+  freq: number;
+  win_count: number;
+  fail_count: number;
+  win_rate: number;
+  avg_buy_sol: number;
+  avg_tip_sol: number;
+  avg_prio_lamports: number;
+  last_seen_at: string;
+}
+
+interface MemberRoleBreakdown {
+  first_sniper: number;
+  follower: number;
+  pre_target: number;
+  other: number;
+}
+
+interface MemberSummary {
+  total_trades: number;
+  total_buyers: number;
+  avg_buyers_per_trade: number;
+  avg_success_rate: number;
+  total_pnl_sol: number;
+  avg_pnl_sol: number;
+  follow_trades: number;
+  independent_trades: number;
+}
+
 interface FeeRec {
   // 0011 修复：tip/prio 改为 nullable —— 样本不足时返 null，不再写 0 伪装
   p50_tip_sol: number | null;
@@ -117,14 +167,28 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
   const [member, setMember] = useState<PoolMember | null>(null);
   const [following, setFollowing] = useState<PoolEdge[]>([]);
   const [followers, setFollowers] = useState<PoolEdge[]>([]);
-  const [analytics, setAnalytics] = useState<{
-    summary: any;
-    trend: AnalyticsTrendPoint[];
-    tipDistribution: BuyerDistribution[];
-    prioDistribution: BuyerDistribution[];
-    topCompetitors: TopCompetitor[];
-    pnlDistribution: BuyerDistribution[];
-  } | null>(null);
+  const [analytics, setAnalytics] = useState<
+    | {
+        view: 'target';
+        summary: any;
+        trend: AnalyticsTrendPoint[];
+        tipDistribution: BuyerDistribution[];
+        prioDistribution: BuyerDistribution[];
+        topCompetitors: TopCompetitor[];
+        pnlDistribution: BuyerDistribution[];
+      }
+    | {
+        view: 'member';
+        summary: MemberSummary;
+        trend: MemberTrendPoint[];
+        tipDistribution: BuyerDistribution[];
+        prioDistribution: BuyerDistribution[];
+        pnlDistribution: BuyerDistribution[];
+        topTargets: TopTarget[];
+        roleBreakdown: MemberRoleBreakdown;
+      }
+    | null
+  >(null);
   const [fee, setFee] = useState<FeeRec | null>(null);
   const [score, setScore] = useState<WorthScore | null>(null);
   const [loading, setLoading] = useState(true);
@@ -353,6 +417,18 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
         </div>
       </div>
 
+      {/* 采集范围说明 banner —— 2026-10-16 新增
+          池子的「跟随」关系只在「目标买入的同 slot / 下一 slot」内检测，
+          长延迟跟单（盯 wallet 后隔几分钟 / 隔几个 slot 跟单）不在统计内，
+          这里的 freq / distinct_targets / following 都是这个口径下的数字。 */}
+      <div className="bg-blue-50/60 dark:bg-blue-500/5 border border-blue-200/60 dark:border-blue-500/20 rounded-xl px-3 py-2 text-xs text-blue-700 dark:text-blue-300 flex items-center gap-2">
+        <span>ℹ️</span>
+        <span>
+          池子只覆盖「同 slot / 下一 slot」内出现在目标旁边的买家；长延迟跟单不在此统计。
+          数字基于最近 30 天窗口。
+        </span>
+      </div>
+
       {/* AkBot 检测详情（命中时显示，方便人工 Solscan 复核） */}
       {member.is_akbot && (
         <div className="bg-orange-50 dark:bg-orange-500/10 border border-orange-200 dark:border-orange-500/30 rounded-xl p-4">
@@ -476,6 +552,30 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
                 <span>平均手续费</span>
                 <span className="font-mono"><SolAmount value={score?.avg_fee_sol} /></span>
               </div>
+              <div className="flex justify-between text-gray-600 dark:text-gray-300">
+                <span>中位 PnL</span>
+                <span className="font-mono"><SolAmount value={score?.median_pnl_sol} signed /></span>
+              </div>
+              <div className="flex justify-between text-gray-600 dark:text-gray-300">
+                <span>胜率</span>
+                <span className="font-mono">{((score?.win_rate ?? 0) * 100).toFixed(1)}%</span>
+              </div>
+              {/* 算式 + reason —— 2026-10-16 新增
+                  原来 score.reason 只在 offered == null 时显示，
+                  但 cost_ratio = 0 / 样本小等"算出来但有 caveat"的场景下 reason 也有用，
+                  常驻展示让操作员敢拍板。 */}
+              <div
+                className="text-[10px] text-gray-400 dark:text-gray-500 pt-1 mt-1 border-t border-dashed border-gray-200/60 dark:border-gray-700/40"
+                title="score = median_pnl × win_rate / log(1 + cost_ratio) （cost_ratio=0 走 EPSILON 分支）"
+              >
+                算式：median_pnl × win_rate ÷ log(1 + cost_ratio)
+              </div>
+              {score?.reason && (
+                <div className="text-[10px] text-amber-600 dark:text-amber-400 flex items-start gap-1">
+                  <span className="shrink-0">⚠</span>
+                  <span>{score.reason}</span>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -502,117 +602,299 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
             <span className="text-xs opacity-70">收益空间有限 (评分 {score.offered.toFixed(2)})</span>
           </div>
         )}
+        {/* 样本不足 / 算不出分时给个浅色提示带。
+            具体原因已经在上面 WorthScore 卡片里常驻显示 (score.reason)，
+            这里只保留简短 banner 提示「这个评分不可用」，避免和卡片重复。 */}
         {score != null && score.offered == null && (
           <div className="mt-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-50 dark:bg-zinc-800/60 border border-gray-200 dark:border-zinc-700 text-gray-600 dark:text-gray-400 text-sm">
             <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-gray-400 text-white text-xs">?</span>
             <span className="font-medium">样本不足，暂不评分</span>
-            <span className="text-xs opacity-70">{score.reason}</span>
+            <span className="text-xs opacity-70">详见上方 Worth Score 卡片的 ⚠ 说明</span>
           </div>
         )}
       </div>
 
-      {/* 竞争分析 */}
+      {/* 竞争分析 —— target / member 两个分支
+          target 视角（监控中）：竞争分析、Top 竞争者、抢单时序
+          member 视角（非监控）：自身买入画像、蹭过的目标、个人时序
+          数据已在 API 层 getAnalyticsFor 拆分，前端按 view 切分支。 */}
       {analytics && (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <Card label="最近 30 天笔数" value={analytics.summary.total_trades} />
-            <Card label="总跟单者" value={analytics.summary.total_buyers} />
-            <Card label="均跟单者/笔" value={analytics.summary.avg_buyers_per_trade.toFixed(1)} />
-            <Card label="平均成功率" value={`${(analytics.summary.avg_success_rate * 100).toFixed(1)}%`} />
+          <div className="flex items-center gap-2">
+            <span
+              className={`inline-flex items-center px-2 py-0.5 rounded text-xs ${
+                analytics.view === 'target'
+                  ? 'bg-purple-50 text-purple-700 dark:bg-purple-500/10 dark:text-purple-400'
+                  : 'bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-400'
+              }`}
+            >
+              {analytics.view === 'target' ? '🎯 Target 视角' : '👤 Member 视角'}
+            </span>
+            <span className="text-xs text-gray-400">
+              {analytics.view === 'target'
+                ? '同 slot / 下一 slot 抢单者聚合'
+                : '该地址自己的买入画像（仅跟单相关）'}
+            </span>
           </div>
 
-          {/* Tip 分布 */}
-          <Section title="抢单手续费 TIP 分布（success vs failed）">
-            <DistributionChart data={analytics.tipDistribution} max={maxDist(analytics.tipDistribution)} />
-          </Section>
-
-          {/* Prio 分布 */}
-          <Section title="抢单手续费 PRIO 分布（SOL, success vs failed）">
-            <DistributionChart data={analytics.prioDistribution} max={maxDist(analytics.prioDistribution)} />
-          </Section>
-
-          {/* PnL 分布 */}
-          <Section title="跟单者 PnL 分布">
-            <DistributionChart data={analytics.pnlDistribution} max={maxDist(analytics.pnlDistribution)} />
-          </Section>
-
-          {/* Top 竞争者 */}
-          <Section title="常驻竞争者 (Top 15)">
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="text-xs text-gray-500">
-                  <tr className="border-b border-gray-200 dark:border-gray-700">
-                    <th className="py-2 px-2 text-left">地址</th>
-                    <th className="py-2 px-2 text-center">出现</th>
-                    <th className="py-2 px-2 text-center">赢</th>
-                    <th className="py-2 px-2 text-center">输</th>
-                    <th className="py-2 px-2 text-center">胜率</th>
-                    <th className="py-2 px-2 text-right">均 TIP</th>
-                    <th className="py-2 px-2 text-right">均 PRIO</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {analytics.topCompetitors.map((c) => (
-                    <tr key={c.address} className="border-b border-gray-100 dark:border-gray-700/50">
-                      <td className="py-1.5 px-2">
-                        <Link href={`/pool/${c.address}`} className="hover:text-brand-500">
-                          <AddressCopy address={c.address} />
-                        </Link>
-                      </td>
-                      <td className="py-1.5 px-2 text-center font-mono">{c.freq}</td>
-                      <td className="py-1.5 px-2 text-center text-success-500 font-mono">{c.win_count}</td>
-                      <td className="py-1.5 px-2 text-center text-error-500 font-mono">{c.fail_count}</td>
-                      <td className="py-1.5 px-2 text-center font-mono">
-                        <span className={c.win_rate >= 0.5 ? 'text-success-500' : 'text-error-500'}>
-                          {(c.win_rate * 100).toFixed(0)}%
-                        </span>
-                      </td>
-                      <td className="py-1.5 px-2 text-right"><SolAmount value={c.avg_tip_sol} /></td>
-                      <td className="py-1.5 px-2 text-right"><PrioSolAmount value={c.avg_prio_lamports} /></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </Section>
-
-          {/* 时序 */}
-          {analytics.trend.length > 0 && (
-            <Section title="最近 30 笔 buy 时序">
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead className="text-gray-500">
-                    <tr className="border-b border-gray-200 dark:border-gray-700">
-                      <th className="py-2 px-2 text-left">时间</th>
-                      <th className="py-2 px-2 text-center">买家</th>
-                      <th className="py-2 px-2 text-center">成功</th>
-                      <th className="py-2 px-2 text-center">失败</th>
-                      <th className="py-2 px-2 text-right">最高 TIP</th>
-                      <th className="py-2 px-2 text-right">最高 PRIO</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {analytics.trend.map((t) => (
-                      <tr key={t.trade_signature} className="border-b border-gray-100 dark:border-gray-700/50">
-                        <td className="py-1.5 px-2"><RelativeTime iso={t.block_time} /></td>
-                        <td className="py-1.5 px-2 text-center font-mono">{t.buyer_count}</td>
-                        <td className="py-1.5 px-2 text-center text-success-500 font-mono">{t.success_count}</td>
-                        <td className="py-1.5 px-2 text-center text-error-500 font-mono">{t.failed_count}</td>
-                        <td className="py-1.5 px-2 text-right"><SolAmount value={t.top_tip_sol} /></td>
-                        <td className="py-1.5 px-2 text-right"><PrioSolAmount value={t.top_prio_lamports} /></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+          {analytics.view === 'target' ? (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <Card label="最近 30 天笔数" value={analytics.summary.total_trades} />
+                <Card label="总跟单者" value={analytics.summary.total_buyers} />
+                <Card label="均跟单者/笔" value={analytics.summary.avg_buyers_per_trade.toFixed(1)} />
+                <Card label="平均成功率" value={`${(analytics.summary.avg_success_rate * 100).toFixed(1)}%`} />
               </div>
-            </Section>
+
+              {/* Tip 分布 */}
+              <Section title="抢单手续费 TIP 分布（success vs failed）">
+                <DistributionChart data={analytics.tipDistribution} max={maxDist(analytics.tipDistribution)} />
+              </Section>
+
+              {/* Prio 分布 */}
+              <Section title="抢单手续费 PRIO 分布（SOL, success vs failed）">
+                <DistributionChart data={analytics.prioDistribution} max={maxDist(analytics.prioDistribution)} />
+              </Section>
+
+              {/* PnL 分布 */}
+              <Section title="跟单者 PnL 分布">
+                <DistributionChart data={analytics.pnlDistribution} max={maxDist(analytics.pnlDistribution)} />
+              </Section>
+
+              {/* Top 竞争者 */}
+              <Section title="常驻竞争者 (Top 15)">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="text-xs text-gray-500">
+                      <tr className="border-b border-gray-200 dark:border-gray-700">
+                        <th className="py-2 px-2 text-left">地址</th>
+                        <th className="py-2 px-2 text-center">出现</th>
+                        <th className="py-2 px-2 text-center">赢</th>
+                        <th className="py-2 px-2 text-center">输</th>
+                        <th className="py-2 px-2 text-center">胜率</th>
+                        <th className="py-2 px-2 text-right">均 TIP</th>
+                        <th className="py-2 px-2 text-right">均 PRIO</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {analytics.topCompetitors.map((c) => (
+                        <tr key={c.address} className="border-b border-gray-100 dark:border-gray-700/50">
+                          <td className="py-1.5 px-2">
+                            <Link href={`/pool/${c.address}`} className="hover:text-brand-500">
+                              <AddressCopy address={c.address} />
+                            </Link>
+                          </td>
+                          <td className="py-1.5 px-2 text-center font-mono">{c.freq}</td>
+                          <td className="py-1.5 px-2 text-center text-success-500 font-mono">{c.win_count}</td>
+                          <td className="py-1.5 px-2 text-center text-error-500 font-mono">{c.fail_count}</td>
+                          <td className="py-1.5 px-2 text-center font-mono">
+                            <span className={c.win_rate >= 0.5 ? 'text-success-500' : 'text-error-500'}>
+                              {(c.win_rate * 100).toFixed(0)}%
+                            </span>
+                          </td>
+                          <td className="py-1.5 px-2 text-right"><SolAmount value={c.avg_tip_sol} /></td>
+                          <td className="py-1.5 px-2 text-right"><PrioSolAmount value={c.avg_prio_lamports} /></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Section>
+
+              {/* 时序 */}
+              {analytics.trend.length > 0 && (
+                <Section title="最近 30 笔 buy 时序">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead className="text-gray-500">
+                        <tr className="border-b border-gray-200 dark:border-gray-700">
+                          <th className="py-2 px-2 text-left">时间</th>
+                          <th className="py-2 px-2 text-center">买家</th>
+                          <th className="py-2 px-2 text-center">成功</th>
+                          <th className="py-2 px-2 text-center">失败</th>
+                          <th className="py-2 px-2 text-right">最高 TIP</th>
+                          <th className="py-2 px-2 text-right">最高 PRIO</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {analytics.trend.map((t) => (
+                          <tr key={t.trade_signature} className="border-b border-gray-100 dark:border-gray-700/50">
+                            <td className="py-1.5 px-2"><RelativeTime iso={t.block_time} /></td>
+                            <td className="py-1.5 px-2 text-center font-mono">{t.buyer_count}</td>
+                            <td className="py-1.5 px-2 text-center text-success-500 font-mono">{t.success_count}</td>
+                            <td className="py-1.5 px-2 text-center text-error-500 font-mono">{t.failed_count}</td>
+                            <td className="py-1.5 px-2 text-right"><SolAmount value={t.top_tip_sol} /></td>
+                            <td className="py-1.5 px-2 text-right"><PrioSolAmount value={t.top_prio_lamports} /></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </Section>
+              )}
+            </>
+          ) : (
+            <>
+              {/* Member 视角 summary —— 重点区分 follow_trades vs independent_trades
+                  让操作员一眼看出"这个地址是只蹭车、还是会自己独立抢单"。 */}
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                <Card label="跟单买入" value={analytics.summary.follow_trades} />
+                <Card label="独立交易" value={analytics.summary.independent_trades} />
+                <Card
+                  label="蹭车胜率"
+                  value={`${(analytics.summary.avg_success_rate * 100).toFixed(1)}%`}
+                />
+                <Card label="总 PnL" value={<SolAmount value={analytics.summary.total_pnl_sol} signed />} />
+                <Card label="均 PnL" value={<SolAmount value={analytics.summary.avg_pnl_sol} signed />} />
+              </div>
+
+              {/* Role 占比 —— 一眼分清「独立交易者 vs 同 slot 蹭车 vs +1 slot 蹭车」 */}
+              <Section title="买入角色占比（最近 30 天）">
+                <RoleBreakdownChart data={analytics.roleBreakdown} />
+              </Section>
+
+              {/* Tip 分布（成员自己的） */}
+              <Section title="跟单时 TIP 分布（success vs failed）">
+                <DistributionChart data={analytics.tipDistribution} max={maxDist(analytics.tipDistribution)} />
+              </Section>
+
+              {/* Prio 分布 */}
+              <Section title="跟单时 PRIO 分布（success vs failed）">
+                <DistributionChart data={analytics.prioDistribution} max={maxDist(analytics.prioDistribution)} />
+              </Section>
+
+              {/* PnL 分布 */}
+              <Section title="跟单 PnL 分布">
+                <DistributionChart data={analytics.pnlDistribution} max={maxDist(analytics.pnlDistribution)} />
+              </Section>
+
+              {/* 蹭过的目标（按战绩排序） */}
+              {analytics.topTargets.length > 0 && (
+                <Section title="蹭过的目标 (Top 15)">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="text-xs text-gray-500">
+                        <tr className="border-b border-gray-200 dark:border-gray-700">
+                          <th className="py-2 px-2 text-left">目标</th>
+                          <th className="py-2 px-2 text-center">次数</th>
+                          <th className="py-2 px-2 text-center">赢/输</th>
+                          <th className="py-2 px-2 text-center">胜率</th>
+                          <th className="py-2 px-2 text-right">均买额</th>
+                          <th className="py-2 px-2 text-right">均 TIP</th>
+                          <th className="py-2 px-2 text-right">均 PRIO</th>
+                          <th className="py-2 px-2 text-center">最近</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {analytics.topTargets.map((t) => (
+                          <tr key={t.address} className="border-b border-gray-100 dark:border-gray-700/50">
+                            <td className="py-1.5 px-2">
+                              <Link href={`/pool/${t.address}`} className="hover:text-brand-500">
+                                <AddressCopy address={t.address} />
+                              </Link>
+                            </td>
+                            <td className="py-1.5 px-2 text-center font-mono font-semibold text-brand-500 dark:text-brand-400">
+                              {t.freq}
+                            </td>
+                            <td className="py-1.5 px-2 text-center text-xs">
+                              <span className="text-success-500">{t.win_count}</span>
+                              <span className="text-gray-300 mx-1">/</span>
+                              <span className="text-error-500">{t.fail_count}</span>
+                            </td>
+                            <td className="py-1.5 px-2 text-center font-mono">
+                              <span className={t.win_rate >= 0.5 ? 'text-success-500' : 'text-error-500'}>
+                                {(t.win_rate * 100).toFixed(0)}%
+                              </span>
+                            </td>
+                            <td className="py-1.5 px-2 text-right"><SolAmount value={t.avg_buy_sol} /></td>
+                            <td className="py-1.5 px-2 text-right"><SolAmount value={t.avg_tip_sol} /></td>
+                            <td className="py-1.5 px-2 text-right"><PrioSolAmount value={t.avg_prio_lamports} /></td>
+                            <td className="py-1.5 px-2 text-center"><RelativeTime iso={t.last_seen_at} /></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </Section>
+              )}
+
+              {/* 个人时序：最近 30 笔「跟单」买入 */}
+              {analytics.trend.length > 0 && (
+                <Section title="最近 30 笔跟单买入时序">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead className="text-gray-500">
+                        <tr className="border-b border-gray-200 dark:border-gray-700">
+                          <th className="py-2 px-2 text-left">时间</th>
+                          <th className="py-2 px-2 text-left">蹭的目标</th>
+                          <th className="py-2 px-2 text-center">角色</th>
+                          <th className="py-2 px-2 text-center">slot 位</th>
+                          <th className="py-2 px-2 text-right">买额</th>
+                          <th className="py-2 px-2 text-right">TIP</th>
+                          <th className="py-2 px-2 text-right">PRIO</th>
+                          <th className="py-2 px-2 text-center">结果</th>
+                          <th className="py-2 px-2 text-right">PnL</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {analytics.trend.map((t) => (
+                          <tr key={t.trade_signature} className="border-b border-gray-100 dark:border-gray-700/50">
+                            <td className="py-1.5 px-2"><RelativeTime iso={t.block_time} /></td>
+                            <td className="py-1.5 px-2">
+                              {t.target_address ? (
+                                <Link href={`/pool/${t.target_address}`} className="hover:text-brand-500">
+                                  <AddressCopy address={t.target_address} length={4} />
+                                </Link>
+                              ) : (
+                                <span className="text-gray-400">-</span>
+                              )}
+                            </td>
+                            <td className="py-1.5 px-2 text-center text-xs">
+                              {t.is_first_sniper ? (
+                                <span className="text-purple-600 dark:text-purple-400">🎯 首狙</span>
+                              ) : t.is_pre_target ? (
+                                <span className="text-amber-600 dark:text-amber-400">⏮ 预瞄</span>
+                              ) : (
+                                <span className="text-blue-600 dark:text-blue-400">↪ 跟随</span>
+                              )}
+                            </td>
+                            <td className="py-1.5 px-2 text-center font-mono text-gray-500">
+                              {t.block_index ?? '-'}
+                            </td>
+                            <td className="py-1.5 px-2 text-right"><SolAmount value={t.buy_sol} /></td>
+                            <td className="py-1.5 px-2 text-right"><SolAmount value={t.tip_sol} /></td>
+                            <td className="py-1.5 px-2 text-right"><PrioSolAmount value={t.prio_lamports} /></td>
+                            <td className="py-1.5 px-2 text-center text-xs">
+                              {t.result === 'success' ? (
+                                <span className="text-success-500">✓</span>
+                              ) : t.result === 'failed' ? (
+                                <span className="text-error-500">✗</span>
+                              ) : (
+                                <span className="text-gray-400">-</span>
+                              )}
+                            </td>
+                            <td className="py-1.5 px-2 text-right">
+                              <SolAmount value={t.pnl_sol} signed />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </Section>
+              )}
+            </>
           )}
         </>
       )}
 
       {/* 关系网络 */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <Section title={`跟随的目标 (${following.length})`}>
+        {/* 表头用 m.distinct_targets 不用 following.length：
+            following.length 受 SQL LIMIT 50 截断（极活跃 follower 才可能命中），
+            m.distinct_targets 是 target_addresses 数组去重后的真实数，
+            否则同页面上 "跟随 87 个独立目标" + "跟随的目标 (50)" 自相矛盾。 */}
+        <Section title={`跟随的目标 (${member.distinct_targets}${following.length < member.distinct_targets ? ` · 表内 Top ${following.length}` : ''})`}>
           {following.length === 0 ? (
             <div className="text-xs text-gray-400 p-3">无跟随记录</div>
           ) : (
@@ -623,6 +905,10 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
                   <th className="py-2 px-2 text-center">次数</th>
                   <th className="py-2 px-2 text-center">赢/输</th>
                   <th className="py-2 px-2 text-center">同 slot / +1</th>
+                  <th className="py-2 px-2 text-right">均买额</th>
+                  <th className="py-2 px-2 text-right">均位置</th>
+                  <th className="py-2 px-2 text-center">首见</th>
+                  <th className="py-2 px-2 text-center">最近</th>
                 </tr>
               </thead>
               <tbody>
@@ -642,6 +928,14 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
                     <td className="py-1.5 px-2 text-center text-xs text-gray-500">
                       {e.same_slot_count} / {e.next_slot_count}
                     </td>
+                    <td className="py-1.5 px-2 text-right"><SolAmount value={e.avg_buy_sol} /></td>
+                    <td className="py-1.5 px-2 text-right font-mono text-xs text-gray-500">
+                      {e.avg_offset_pos != null ? e.avg_offset_pos.toFixed(1) : '-'}
+                    </td>
+                    <td className="py-1.5 px-2 text-center"><RelativeTime iso={e.first_seen_at} /></td>
+                    <td className="py-1.5 px-2 text-center">
+                      <span title={e.last_seen_at ?? ''}><RelativeTime iso={e.last_seen_at} /></span>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -659,6 +953,10 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
                   <th className="py-2 px-2 text-center">次数</th>
                   <th className="py-2 px-2 text-center">赢/输</th>
                   <th className="py-2 px-2 text-center">同 slot / +1</th>
+                  <th className="py-2 px-2 text-right">均买额</th>
+                  <th className="py-2 px-2 text-right">均位置</th>
+                  <th className="py-2 px-2 text-center">首见</th>
+                  <th className="py-2 px-2 text-center">最近</th>
                 </tr>
               </thead>
               <tbody>
@@ -677,6 +975,14 @@ export default function PoolDetailPage({ params }: { params: Promise<{ address: 
                     </td>
                     <td className="py-1.5 px-2 text-center text-xs text-gray-500">
                       {e.same_slot_count} / {e.next_slot_count}
+                    </td>
+                    <td className="py-1.5 px-2 text-right"><SolAmount value={e.avg_buy_sol} /></td>
+                    <td className="py-1.5 px-2 text-right font-mono text-xs text-gray-500">
+                      {e.avg_offset_pos != null ? e.avg_offset_pos.toFixed(1) : '-'}
+                    </td>
+                    <td className="py-1.5 px-2 text-center"><RelativeTime iso={e.first_seen_at} /></td>
+                    <td className="py-1.5 px-2 text-center">
+                      <span title={e.last_seen_at ?? ''}><RelativeTime iso={e.last_seen_at} /></span>
                     </td>
                   </tr>
                 ))}
@@ -740,6 +1046,85 @@ function DistributionChart({ data, max }: { data: BuyerDistribution[]; max: numb
       {data.every((d) => d.success_count === 0 && d.failed_count === 0) && (
         <div className="text-xs text-gray-400 py-3 text-center">无样本数据</div>
       )}
+    </div>
+  );
+}
+
+/** 角色占比条 —— 2026-10-16 新增
+    横向堆叠条 + 数字明细，让操作员一眼看出"独立交易者 / 同 slot 蹭车 / +1 slot 蹭车"
+    的比例。0 样本时直接不渲染条，给一行说明。
+*/
+function RoleBreakdownChart({ data }: { data: { first_sniper: number; follower: number; pre_target: number; other: number } }) {
+  const total = data.first_sniper + data.follower + data.pre_target + data.other;
+  if (total === 0) {
+    return <div className="text-xs text-gray-400 py-3 text-center">无样本数据</div>;
+  }
+  const pct = (n: number) => (total > 0 ? (n / total) * 100 : 0);
+  const items: Array<{ key: keyof typeof data; label: string; emoji: string; color: string; tip: string }> = [
+    {
+      key: 'first_sniper',
+      label: '首狙',
+      emoji: '🎯',
+      color: 'bg-purple-500',
+      tip: '同 slot 内、目标之前第一笔买入；典型 sniper bot',
+    },
+    {
+      key: 'follower',
+      label: '跟随',
+      emoji: '↪',
+      color: 'bg-blue-500',
+      tip: '同 slot 内、目标之后的买入；典型 copy bot / 跟单党',
+    },
+    {
+      key: 'pre_target',
+      label: '预瞄',
+      emoji: '⏮',
+      color: 'bg-amber-500',
+      tip: '目标之后下一 slot 内买入；可能跨 slot 跟单',
+    },
+    {
+      key: 'other',
+      label: '独立',
+      emoji: '∅',
+      color: 'bg-gray-400',
+      tip: '跟单标记均不命中，可能是独立交易（不参与本地址跟单画像）',
+    },
+  ];
+
+  return (
+    <div>
+      {/* 堆叠条 */}
+      <div className="flex h-6 rounded overflow-hidden border border-gray-200 dark:border-gray-700">
+        {items.map((it) => {
+          const n = data[it.key];
+          if (n === 0) return null;
+          return (
+            <div
+              key={it.key}
+              className={`${it.color} flex items-center justify-center text-white text-[10px] font-mono transition-all`}
+              style={{ width: `${pct(n)}%`, minWidth: '32px' }}
+              title={`${it.label}: ${n} 笔 (${pct(n).toFixed(1)}%)`}
+            >
+              {pct(n) > 8 ? `${n}` : ''}
+            </div>
+          );
+        })}
+      </div>
+      {/* 数字明细 */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-3 text-xs">
+        {items.map((it) => {
+          const n = data[it.key];
+          return (
+            <div key={it.key} className="flex items-center gap-2" title={it.tip}>
+              <span className={`inline-block w-2 h-2 rounded-full ${it.color}`} />
+              <span className="text-gray-500">{it.emoji} {it.label}</span>
+              <span className="font-mono text-gray-700 dark:text-gray-300 ml-auto">
+                {n} ({pct(n).toFixed(1)}%)
+              </span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

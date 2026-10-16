@@ -279,11 +279,22 @@ export async function recommendFeeForTarget(targetAddress: string): Promise<FeeR
 }
 
 /**
- * 单个 pool member 的手续费推荐：它自己历次买入实际交了多少。
+ * 单个 pool member 的手续费推荐：它自己历次「跟单」买入实际交了多少。
  *
  * 不能复用 target 视角那条 SQL —— 那条按 target_trades.target_address 过滤，
  * member 在 target_trades 里根本不存在，查出来永远是空，
  * 于是 recommended_tip_sol 恒为 0（页面上因为 0 是 falsy 一直显示 '-'）。
+ *
+ * 2026-10-16 修复：收紧到「跟单相关」买入。
+ *   旧 SQL 是 `WHERE bb.address = $1`，把这个地址所有买入（含它独立 swap / 独立
+ *   meme 抢单）都算进去。一个独立赚钱很好的地址偶然蹭了 5 笔监控目标的车，
+ *   它的 fee P50/P75 会被「独立 swap 的 tip」主导，跟单建议完全失真。
+ *   限定 is_follower / is_first_sniper / is_pre_target 任一为 TRUE，
+ *   跟 scoreMemberPnl 保持同一口径，让 fee 建议和 worth 评分在同一个样本集上。
+ *
+ * 跟单子集可能让样本量变很小（很多 follower 90% 的买入是「非跟单」），
+ * 拿不到足够 sample 时 summarizeFees 仍返 null，不写 0 ——
+ * 推荐建议宁缺毋滥，没样本就显示 '-' 让操作员意识到。
  */
 export async function recommendFeeForMember(address: string): Promise<FeeRecommendation> {
   const buyerRows = await query<any>(`
@@ -292,6 +303,12 @@ export async function recommendFeeForMember(address: string): Promise<FeeRecomme
       FROM block_buyers bb
       JOIN block_analyses ba ON ba.id = bb.block_analysis_id
      WHERE bb.address = $1
+       AND bb.is_own = FALSE
+       AND (
+         bb.is_follower = TRUE
+         OR bb.is_first_sniper = TRUE
+         OR bb.is_pre_target = TRUE
+       )
        AND ba.block_time >= NOW() - (($2 || ' days')::interval)
      ORDER BY ba.block_time DESC
      LIMIT $3
@@ -376,6 +393,15 @@ export async function scoreTargetPnl(targetAddress: string): Promise<WorthScore>
  *     算进去只会稀释胜率，所以整个排除（分子分母一起排）。
  *   - buy_failed 的亏损来自那笔交易本身失败，不是这个地址选错了标的，
  *     计入只会稀释「跟这个地址赚不赚钱」的信号，同样排除。
+ *
+ * 2026-10-16 修复：收紧到「跟单相关」买入（is_follower / is_first_sniper /
+ *   is_pre_target 任一 TRUE）。
+ *   旧 SQL 是 `WHERE bb.address = $1`，把这个地址全部买入（包括它独立 swap /
+ *   独立 meme 抢单）都算进去。后果：独立赚钱很好的地址蹭了 5 笔监控目标的车，
+ *   它的 PnL 中位数 / 胜率 / 成本占比会被「独立交易」主导，导致：
+ *     - WorthScore 虚高（独立赚钱 → 评分漂亮，但跟单表现未必好）
+ *     - cost_ratio 偏低（独立 swap 走 jito bundle 0 tip，把 cost 拉低）
+ *   限定后跟单 PnL 跟 recommendFeeForMember 走同一子集，评分 / 推荐口径一致。
  */
 export async function scoreMemberPnl(address: string): Promise<WorthScore> {
   const row = await queryOne<any>(`
@@ -400,6 +426,12 @@ export async function scoreMemberPnl(address: string): Promise<WorthScore> {
     FROM block_buyers bb
     JOIN block_analyses ba ON ba.id = bb.block_analysis_id
     WHERE bb.address = $1
+      AND bb.is_own = FALSE
+      AND (
+        bb.is_follower = TRUE
+        OR bb.is_first_sniper = TRUE
+        OR bb.is_pre_target = TRUE
+      )
       AND ba.block_time >= NOW() - (($2 || ' days')::interval)
   `, [address, LOOKBACK_DAYS]);
 

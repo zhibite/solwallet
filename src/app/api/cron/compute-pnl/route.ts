@@ -75,6 +75,7 @@ export async function POST(req: NextRequest) {
     skipped: number;
     errors: number;
     error?: string;
+    durationMs?: number;
   }[] = [];
 
   try {
@@ -88,6 +89,8 @@ export async function POST(req: NextRequest) {
     //      - 写完不读 result（低优先级；标 stale 之后即使被前端读到"stale"也是正确语义）。
     //      - 用 RETURNING 拿到实际标了多少行，方便 summary 给运维一个数字。
     //    注意：mark-stale 和拉 analyses 是两个独立 SQL，没有事务依赖，失败互不影响。
+    //    0025：排除 next_balance_check_at IS NOT NULL 的行 —— 那些是 balance-probe 还在管的行，
+    //    它会比 FIFO 更快算出来，标 stale 等于把它们错误放弃。
     const markStaleResult = await query<{ marked: number }>(`
       WITH stale_rows AS (
         UPDATE block_buyers bb
@@ -96,6 +99,7 @@ export async function POST(req: NextRequest) {
         WHERE bb.block_analysis_id = ba.id
           AND bb.pnl_status IS NULL
           AND bb.result = 'success'
+          AND bb.next_balance_check_at IS NULL
           AND ba.block_time < NOW() - INTERVAL '2 hours'
         RETURNING bb.id
       )
@@ -192,7 +196,7 @@ export async function POST(req: NextRequest) {
 
     const totalComputed = results.reduce((sum, r) => sum + r.computed, 0);
     const totalErrors = results.reduce((sum, r) => sum + r.errors, 0);
-    const totalDuration = results.reduce((sum, r) => sum + r.durationMs, 0);
+    const totalDuration = results.reduce((sum, r) => sum + (r.durationMs ?? 0), 0);
 
     return NextResponse.json({
       ok: true,
